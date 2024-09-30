@@ -67,6 +67,19 @@
         label="Limit"
         :error="limitError"
       />
+      <InputListBox
+        v-model="selectedLimitType"
+        :items="computationModeList"
+        class="order-3 grow basis-full sm:max-lg:order-3 sm:max-lg:basis-0"
+        label="Top selection mode"
+      >
+        <template #selected>{{ selectedLimitType.name }}</template>
+        <template #item="{ name }">
+          <div class="flex w-full items-center justify-between">
+            <span>{{ name }}</span>
+          </div>
+        </template>
+      </InputListBox>
     </div>
   </div>
 </template>
@@ -117,6 +130,21 @@ const limitError = computed(() => {
   }
   return "";
 });
+
+const computationModes = {
+  avg: "Avg",
+  max: "Max",
+} as const;
+
+const computationModeList = Object.entries(computationModes).map(
+  ([k, v], idx) => ({
+    id: idx + 1,
+    type: k as keyof typeof computationModes, // why isn't it infered?
+    name: v,
+  }),
+);
+const selectedLimitType = ref(computationModeList[0]);
+
 const canAggregate = computed(
   () =>
     intersection(
@@ -147,7 +175,6 @@ const hasErrors = computed(
     !!truncate4Error.value ||
     !!truncate6Error.value,
 );
-
 const dimensions = computed(
   () =>
     serverConfiguration.value?.dimensions.map((v, idx) => ({
@@ -166,7 +193,6 @@ const removeDimension = (dimension: (typeof dimensions.value)[0]) => {
     (d) => d !== dimension,
   );
 };
-
 watch(
   () => [props.modelValue, dimensions.value] as const,
   ([value, dimensions]) => {
@@ -183,11 +209,19 @@ watch(
   { immediate: true, deep: true },
 );
 watch(
-  [selectedDimensions, limit, truncate4, truncate6, hasErrors] as const,
-  ([selected, limit, truncate4, truncate6, hasErrors]) => {
+  [
+    selectedDimensions,
+    limit,
+    selectedLimitType,
+    truncate4,
+    truncate6,
+    hasErrors,
+  ] as const,
+  ([selected, limit, limitType, truncate4, truncate6, hasErrors]) => {
     const updated = {
       selected: selected.map((d) => d.name),
       limit: parseInt(limit),
+      limitType: limitType.name,
       truncate4: parseInt(truncate4),
       truncate6: parseInt(truncate6),
       errors: hasErrors,
@@ -208,6 +242,7 @@ watch(
 export type ModelType = {
   selected: string[];
   limit: number;
+  limitType: string;
   truncate4: number;
   truncate6: number;
   errors?: boolean;
