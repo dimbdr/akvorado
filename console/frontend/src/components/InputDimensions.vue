@@ -67,6 +67,14 @@
         label="Limit"
         :error="limitError"
       />
+      <InputListBox
+        v-model="selectedLimitType"
+        :items="limitType"
+        :error="limitTypeError"
+        label="Limit Type"
+        filter="name"
+        class="col-span-2 lg:col-span-1"
+      ></InputListBox>
     </div>
   </div>
 </template>
@@ -117,6 +125,13 @@ const limitError = computed(() => {
   }
   return "";
 });
+const selectedLimitType = ref<string>("");
+const limitTypeError = computed(() => {
+  const validLimitTypeNames = limitType.value.map((item) => item.name);
+  if (!validLimitTypeNames.includes(selectedLimitType.value))
+    return "Not available";
+  return "";
+});
 const canAggregate = computed(
   () =>
     intersection(
@@ -146,6 +161,14 @@ const hasErrors = computed(
     !!dimensionsError.value ||
     !!truncate4Error.value ||
     !!truncate6Error.value,
+);
+
+const limitType = computed(
+  () =>
+    Array("Avg", "Max").map((v, idx) => ({
+      id: idx + 1,
+      name: v,
+    })) || [],
 );
 
 const dimensions = computed(
