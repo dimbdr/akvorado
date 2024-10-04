@@ -125,7 +125,7 @@ const limitError = computed(() => {
   }
   return "";
 });
-const selectedLimitType = ref<string>("");
+const selectedLimitType = ref("");
 const limitTypeError = computed(() => {
   const validLimitTypeNames = limitType.value.map((item) => item.name);
   if (!validLimitTypeNames.includes(selectedLimitType.value))
@@ -158,6 +158,7 @@ const truncate6Error = computed(() => {
 const hasErrors = computed(
   () =>
     !!limitError.value ||
+    !!limitTypeError.value ||
     !!dimensionsError.value ||
     !!truncate4Error.value ||
     !!truncate6Error.value,
@@ -206,11 +207,19 @@ watch(
   { immediate: true, deep: true },
 );
 watch(
-  [selectedDimensions, limit, truncate4, truncate6, hasErrors] as const,
-  ([selected, limit, truncate4, truncate6, hasErrors]) => {
+  [
+    selectedDimensions,
+    limit,
+    selectedLimitType,
+    truncate4,
+    truncate6,
+    hasErrors,
+  ] as const,
+  ([selected, limit, limitType, truncate4, truncate6, hasErrors]) => {
     const updated = {
       selected: selected.map((d) => d.name),
       limit: parseInt(limit),
+      limitType: limitType,
       truncate4: parseInt(truncate4),
       truncate6: parseInt(truncate6),
       errors: hasErrors,
@@ -231,6 +240,7 @@ watch(
 export type ModelType = {
   selected: string[];
   limit: number;
+  limitType: string;
   truncate4: number;
   truncate6: number;
   errors?: boolean;
