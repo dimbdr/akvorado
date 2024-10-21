@@ -164,10 +164,13 @@ const hasErrors = computed(
     !!truncate6Error.value,
 );
 
-const limitType = computed(() => [
-  { id: 1, name: "Avg" },
-  { id: 2, name: "Max" },
-]);
+const limitType = computed(
+  () =>
+    Array("Avg", "Max").map((v, idx) => ({
+      id: idx + 1,
+      name: v,
+    })) || [],
+);
 
 const dimensions = computed(
   () =>
