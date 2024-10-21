@@ -68,30 +68,16 @@
         :error="limitError"
       />
       <InputListBox
-        :model-value="selectedLimitType"
-        :items="limitType"
-        :error="limitTypeError"
-        label="Limit Type"
-        filter="name"
-        class="col-span-2 lg:col-span-1"
-        @update:model-value="handleLimitTypeChange"
+        v-model="selectedLimitType"
+        :items="computationModeList"
+        class="order-3 grow basis-full sm:max-lg:order-3 sm:max-lg:basis-0"
+        label="Top selection mode"
       >
-        <!-- Slot for showing selected item -->
-        <template #selected>
-          <span v-if="!selectedLimitType">No limit type selected</span>
-          <span v-else>
-            <span class="leading-4">{{ selectedLimitType }}</span>
-          </span>
-          <span
-            class="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2"
-          >
-            <SelectorIcon class="h-5 w-5 text-gray-400" aria-hidden="true" />
-          </span>
-        </template>
-
-        <!-- Slot for rendering list of items -->
+        <template #selected>{{ selectedLimitType.name }}</template>
         <template #item="{ name }">
-          {{ name }}
+          <div class="flex w-full items-center justify-between">
+            <span>{{ name }}</span>
+          </div>
         </template>
       </InputListBox>
     </div>
@@ -144,39 +130,21 @@ const limitError = computed(() => {
   }
   return "";
 });
-interface LimitTypeItem {
-  id: number;
-  name: string;
-}
 
-const selectedLimitType = ref(""); // Ensure correct binding
+const computationModes = {
+  avg: "Avg",
+  max: "Max",
+} as const;
 
-const limitType = computed<LimitTypeItem[]>(
-  () =>
-    Array("Avg", "Max").map((v, idx) => ({
-      id: idx + 1,
-      name: v,
-    })) || [],
+const computationModeList = Object.entries(computationModes).map(
+  ([k, v], idx) => ({
+    id: idx + 1,
+    type: k as keyof typeof computationModes, // why isn't it infered?
+    name: v,
+  }),
 );
+const selectedLimitType = ref(computationModeList[0]);
 
-const limitTypeError = computed(() => {
-  const validLimitTypeNames = limitType.value.map((item) => item.name);
-  if (!validLimitTypeNames.includes(selectedLimitType.value))
-    return "Not available";
-  return "";
-});
-
-const handleLimitTypeChange = (newValue: LimitTypeItem) => {
-  console.log("New Limit Type Selected:", newValue);
-  selectedLimitType.value = newValue.name; // Store only the name
-};
-
-watch(
-  () => selectedLimitType.value,
-  (newValue) => {
-    console.log("Selected Limit Type:", newValue); // Check selection
-  },
-);
 const canAggregate = computed(
   () =>
     intersection(
@@ -203,7 +171,6 @@ const truncate6Error = computed(() => {
 const hasErrors = computed(
   () =>
     !!limitError.value ||
-    !!limitTypeError.value ||
     !!dimensionsError.value ||
     !!truncate4Error.value ||
     !!truncate6Error.value,
@@ -254,7 +221,7 @@ watch(
     const updated = {
       selected: selected.map((d) => d.name),
       limit: parseInt(limit),
-      limitType: limitType,
+      limitType: limitType.name,
       truncate4: parseInt(truncate4),
       truncate6: parseInt(truncate6),
       errors: hasErrors,
