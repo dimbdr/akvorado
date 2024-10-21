@@ -70,17 +70,38 @@
       <InputListBox
         v-model="selectedLimitType"
         :items="limitType"
+        :item-value="(item: LimitTypeItem) => item.name"
         :error="limitTypeError"
         label="Limit Type"
         filter="name"
         class="col-span-2 lg:col-span-1"
-      ></InputListBox>
+      >
+        <!-- Slot for showing selected item -->
+        <template #selected>
+          <span v-if="!selectedLimitType">No limit type selected</span>
+          <span v-else>
+            <span class="leading-4">{{ selectedLimitType }}</span>
+            <!-- Since it's a string -->
+          </span>
+          <span
+            class="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2"
+          >
+            <SelectorIcon class="h-5 w-5 text-gray-400" aria-hidden="true" />
+          </span>
+        </template>
+
+        <!-- Slot for showing list items -->
+        <template #item="{ name }">
+          {{ name }}
+          <!-- Display the name in the dropdown -->
+        </template>
+      </InputListBox>
     </div>
   </div>
 </template>
 
 <script lang="ts" setup>
-import { ref, watch, computed, inject } from "vue";
+import { ref, watch, computed, inject, watchEffect } from "vue";
 import draggable from "vuedraggable";
 import { XIcon, SelectorIcon } from "@heroicons/vue/solid";
 import { dataColor } from "@/utils";
@@ -88,6 +109,11 @@ import InputString from "@/components/InputString.vue";
 import InputListBox from "@/components/InputListBox.vue";
 import { ServerConfigKey } from "@/components/ServerConfigProvider.vue";
 import { isEqual, intersection } from "lodash-es";
+
+interface LimitTypeItem {
+  id: number;
+  name: string;
+}
 
 const props = withDefaults(
   defineProps<{
@@ -128,6 +154,8 @@ const limitError = computed(() => {
 const selectedLimitType = ref("");
 const limitTypeError = computed(() => {
   const validLimitTypeNames = limitType.value.map((item) => item.name);
+  console.log("Valid Limit Type Names:", validLimitTypeNames);
+  console.log("Selected Limit Type:", selectedLimitType.value);
   if (!validLimitTypeNames.includes(selectedLimitType.value))
     return "Not available";
   return "";
@@ -164,14 +192,16 @@ const hasErrors = computed(
     !!truncate6Error.value,
 );
 
-const limitType = computed(
+const limitType = computed<LimitTypeItem[]>(
   () =>
     Array("Avg", "Max").map((v, idx) => ({
       id: idx + 1,
       name: v,
     })) || [],
 );
-
+watch(limitType, (newVal) => {
+  console.log("Limit Type Options:", newVal); // Should log: [{ id: 1, name: "Avg" }, { id: 2, name: "Max" }]
+});
 const dimensions = computed(
   () =>
     serverConfiguration.value?.dimensions.map((v, idx) => ({
@@ -190,7 +220,11 @@ const removeDimension = (dimension: (typeof dimensions.value)[0]) => {
     (d) => d !== dimension,
   );
 };
-
+watchEffect(() => {
+  if (!limitType.value.find((item) => item.name === selectedLimitType.value)) {
+    selectedLimitType.value = limitType.value[0]?.name || "";
+  }
+});
 watch(
   () => [props.modelValue, dimensions.value] as const,
   ([value, dimensions]) => {
