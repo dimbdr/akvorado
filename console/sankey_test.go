@@ -76,7 +76,7 @@ ORDER BY xps DESC
 WITH
  source AS (SELECT * FROM {{ .Table }} SETTINGS asterisk_include_alias_columns = 1),
  (SELECT MAX(TimeReceived) - MIN(TimeReceived) FROM source WHERE {{ .Timefilter }}) AS range,
- rows AS (SELECT SrcAS, ExporterName FROM ( SELECT SrcAS, ExporterName, {{ .Units }} AS sum_at_time FROM source WHERE {{ .Timefilter }} GROUP BY SrcAS, ExporterName ) GROUP BY SrcAS, ExporterName ORDER BY MAX(sum_at_time) DESC LIMIT 5)
+ rows AS (SELECT SrcAS, ExporterName FROM ( SELECT SrcAS, ExporterName, MAX({{ .Units }}) AS sum_at_time FROM source WHERE {{ .Timefilter }} GROUP BY SrcAS, ExporterName ) GROUP BY SrcAS, ExporterName ORDER BY sum_at_time DESC LIMIT 5)
 SELECT
  {{ .Units }}/range AS xps,
  [if(SrcAS IN (SELECT SrcAS FROM rows), concat(toString(SrcAS), ': ', dictGetOrDefault('asns', 'name', SrcAS, '???')), 'Other'),

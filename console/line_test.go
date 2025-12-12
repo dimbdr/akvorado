@@ -509,7 +509,7 @@ ORDER BY time WITH FILL
 {{ with context @@{"start":"2022-04-10T15:45:10Z","end":"2022-04-11T15:45:10Z","points":100,"units":"l3bps"}@@ }}
 WITH
  source AS (SELECT * FROM {{ .Table }} SETTINGS asterisk_include_alias_columns = 1),
- rows AS (SELECT ExporterName, InIfProvider FROM ( SELECT ExporterName, InIfProvider, {{ .Units }} AS sum_at_time FROM source WHERE {{ .Timefilter }} GROUP BY ExporterName, InIfProvider ) GROUP BY ExporterName, InIfProvider ORDER BY MAX(sum_at_time) DESC LIMIT 20)
+ rows AS (SELECT ExporterName, InIfProvider FROM ( SELECT ExporterName, InIfProvider, MAX({{ .Units }}) AS sum_at_time FROM source WHERE {{ .Timefilter }} GROUP BY ExporterName, InIfProvider ) GROUP BY ExporterName, InIfProvider ORDER BY sum_at_time DESC LIMIT 20)
 SELECT 1 AS axis, * FROM (
 SELECT
  {{ call .ToStartOfInterval "TimeReceived" }} AS time,
