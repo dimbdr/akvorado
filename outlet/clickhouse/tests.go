@@ -8,6 +8,7 @@ package clickhouse
 import (
 	"context"
 	"testing"
+	"time"
 
 	"akvorado/common/schema"
 )
@@ -31,6 +32,9 @@ func (c *mockComponent) NewWorker(_ int, bf *schema.FlowMessage) Worker {
 		bf: bf,
 	}
 }
+
+// FlushTimeout returns a short deadline for the mock component.
+func (c *mockComponent) FlushTimeout() time.Duration { return time.Second }
 
 // mockWorker is a mock version of the ClickHouse worker.
 type mockWorker struct {

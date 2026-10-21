@@ -71,6 +71,14 @@ type commonWorker struct {
 	asyncSettings []ch.Setting
 }
 
+// FlushTimeout returns the recommended deadline for the final flush on
+// shutdown. It is the configured grace period plus a small margin: the
+// worker waits for the grace period once its parent context is done,
+// so the parent needs to outlive it for a retry to be possible.
+func (c *realComponent) FlushTimeout() time.Duration {
+	return c.config.GracePeriod + 10*time.Second
+}
+
 // NewWorker creates a new worker to push data to ClickHouse.
 func (c *realComponent) NewWorker(i int, bf *schema.FlowMessage) Worker {
 	opts, servers := c.d.ClickHouse.ChGoOptions()

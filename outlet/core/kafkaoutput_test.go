@@ -39,6 +39,8 @@ func (finalizingClickHouse) NewWorker(_ int, bf *schema.FlowMessage) clickhouse.
 	return &finalizingWorker{bf: bf}
 }
 
+func (finalizingClickHouse) FlushTimeout() time.Duration { return time.Second }
+
 type finalizingWorker struct{ bf *schema.FlowMessage }
 
 func (w *finalizingWorker) FinalizeAndSend(context.Context) clickhouse.WorkerStatus {
