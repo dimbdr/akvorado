@@ -7,6 +7,8 @@
 package clickhouse
 
 import (
+	"time"
+
 	"akvorado/common/clickhousedb"
 	"akvorado/common/reporter"
 	"akvorado/common/schema"
@@ -15,6 +17,12 @@ import (
 // Component is the interface for the ClickHouse exporter component.
 type Component interface {
 	NewWorker(int, *schema.FlowMessage) Worker
+	// FlushTimeout returns the recommended timeout for the final flush
+	// of a worker on shutdown. Callers should use it as the deadline
+	// for the context passed to Worker.Flush(): the worker honors the
+	// grace period on its own, but only while the provided context is
+	// still alive.
+	FlushTimeout() time.Duration
 }
 
 // realComponent implements the ClickHouse exporter

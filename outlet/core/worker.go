@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync/atomic"
-	"time"
 
 	"akvorado/common/pb"
 	"akvorado/common/reporter"
@@ -52,7 +51,12 @@ func (c *Component) newWorker(i int, scaleRequestChan chan<- kafkainput.ScaleReq
 // ClickHouse connections.
 func (w *worker) shutdown() {
 	w.l.Info().Msg("flush final batch to ClickHouse")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Use the ClickHouse component's recommended flush timeout (the
+	// configured grace period plus a margin) instead of a fixed short
+	// deadline: the worker only honors the grace period while the
+	// provided context is alive, so a 10s deadline here made the
+	// grace period ineffective and dropped the final batch.
+	ctx, cancel := context.WithTimeout(context.Background(), w.c.d.ClickHouse.FlushTimeout())
 	defer cancel()
 	w.cw.Flush(ctx)
 	w.cw.Close()
