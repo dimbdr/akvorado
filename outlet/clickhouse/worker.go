@@ -66,7 +66,13 @@ type commonWorker struct {
 	selectServer selectServerFunc
 	// connectFn establishes/validates the connection for a server. It defaults to
 	// ensureConnected and is a field so tests can inject a fake dialer.
-	connectFn     func(context.Context, *serverConn) error
+	connectFn func(context.Context, *serverConn) error
+	// insertFn sends a batch to a server. It defaults to conn.Do and is a field
+	// so tests can inject a fake insert.
+	insertFn func(context.Context, *serverConn, ch.Query) error
+	// onFlushed is called once a batch is confirmed written (or when there is
+	// nothing left to write). It is used to commit Kafka offsets.
+	onFlushed     func()
 	options       ch.Options
 	asyncSettings []ch.Setting
 }
@@ -80,16 +86,17 @@ func (c *realComponent) FlushTimeout() time.Duration {
 }
 
 // NewWorker creates a new worker to push data to ClickHouse.
-func (c *realComponent) NewWorker(i int, bf *schema.FlowMessage) Worker {
+func (c *realComponent) NewWorker(i int, bf *schema.FlowMessage, onFlushed func()) Worker {
 	opts, servers := c.d.ClickHouse.ChGoOptions()
 	conns := make([]*serverConn, len(servers))
 	for j, s := range servers {
 		conns[j] = &serverConn{address: s}
 	}
 	common := &commonWorker{
-		c:      c,
-		bf:     bf,
-		logger: c.r.With().Int("worker", i).Logger(),
+		c:         c,
+		bf:        bf,
+		logger:    c.r.With().Int("worker", i).Logger(),
+		onFlushed: onFlushed,
 
 		servers: conns,
 		options: opts,
@@ -111,6 +118,7 @@ func (c *realComponent) NewWorker(i int, bf *schema.FlowMessage) Worker {
 		},
 	}
 	common.connectFn = common.ensureConnected
+	common.insertFn = common.doInsert
 	switch c.config.ServerSelection {
 	case ServerSelectionRoundRobin:
 		// Stagger the starting server per worker so batches spread across all
@@ -162,6 +170,10 @@ func (w *commonWorker) FinalizeAndSend(ctx context.Context) WorkerStatus {
 func (w *commonWorker) Flush(ctx context.Context) {
 	var useAsync bool
 	if w.bf.FlowCount() == 0 {
+		// Nothing to write: everything tracked since the last flush was
+		// either already written or deliberately dropped, so callers may
+		// commit their offsets.
+		w.flushed()
 		return
 	}
 	// Async mode if have not a big batch size
@@ -217,7 +229,7 @@ func (w *commonWorker) Flush(ctx context.Context) {
 
 		// Send to ClickHouse in flows_XXXXX_raw.
 		start := time.Now()
-		if err := sc.conn.Do(chCtx, ch.Query{
+		if err := w.insertFn(chCtx, sc, ch.Query{
 			Body:     w.bf.ClickHouseProtoInput().Into(fmt.Sprintf("flows_%s_raw", w.c.d.Schema.ClickHouseHash())),
 			Input:    w.bf.ClickHouseProtoInput(),
 			Settings: settings,
@@ -233,10 +245,24 @@ func (w *commonWorker) Flush(ctx context.Context) {
 
 		// Clear batch
 		w.bf.Clear()
+		// The batch is durable: callers can commit the corresponding offsets.
+		w.flushed()
 		return nil, nil
 	}, backoff.WithBackOff(b), backoff.WithMaxElapsedTime(0)); err != nil {
 		w.logger.Err(err).Int("flows", w.bf.FlowCount()).Msg("batch lost, cannot flush to ClickHouse")
 		w.c.metrics.errors.WithLabelValues("flush").Inc()
+	}
+}
+
+// doInsert sends a batch to a ClickHouse server.
+func (w *commonWorker) doInsert(ctx context.Context, sc *serverConn, query ch.Query) error {
+	return sc.conn.Do(ctx, query)
+}
+
+// flushed notifies the caller that the current batch is durable.
+func (w *commonWorker) flushed() {
+	if w.onFlushed != nil {
+		w.onFlushed()
 	}
 }
 

@@ -35,20 +35,28 @@ import (
 // clears instead of finalizing, which would leave ProtobufMessage() empty.
 type finalizingClickHouse struct{}
 
-func (finalizingClickHouse) NewWorker(_ int, bf *schema.FlowMessage) clickhouse.Worker {
-	return &finalizingWorker{bf: bf}
+func (finalizingClickHouse) NewWorker(_ int, bf *schema.FlowMessage, onFlushed func()) clickhouse.Worker {
+	return &finalizingWorker{bf: bf, onFlushed: onFlushed}
 }
 
 func (finalizingClickHouse) FlushTimeout() time.Duration { return time.Second }
 
-type finalizingWorker struct{ bf *schema.FlowMessage }
+type finalizingWorker struct {
+	bf        *schema.FlowMessage
+	onFlushed func()
+}
 
 func (w *finalizingWorker) FinalizeAndSend(context.Context) clickhouse.WorkerStatus {
 	w.bf.Finalize()
 	return clickhouse.WorkerStatusIdle
 }
 
-func (w *finalizingWorker) Flush(context.Context) { w.bf.Clear() }
+func (w *finalizingWorker) Flush(context.Context) {
+	w.bf.Clear()
+	if w.onFlushed != nil {
+		w.onFlushed()
+	}
+}
 
 func (w *finalizingWorker) Close() {}
 
@@ -150,7 +158,7 @@ func TestCoreKafkaOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalVT() error:\n%+v", err)
 	}
-	incoming <- data
+	incoming <- kafkainput.Record{Value: data}
 
 	// The flow is forwarded to ClickHouse and, in parallel, produced to Kafka.
 	expectedMetrics := map[string]string{"sent_messages_total": "1"}

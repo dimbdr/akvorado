@@ -130,7 +130,7 @@ func TestCore(t *testing.T) {
 	}
 	injectFlow := func(flow *schema.FlowMessage, rateLimit uint64) {
 		t.Helper()
-		incoming <- encodeFlow(flow, rateLimit, uint64(flow.TimeReceived))
+		incoming <- kafkainput.Record{Value: encodeFlow(flow, rateLimit, uint64(flow.TimeReceived))}
 	}
 
 	t.Run("core", func(t *testing.T) {
@@ -215,12 +215,12 @@ func TestCore(t *testing.T) {
 
 		// Use a dedicated worker to process the flows synchronously.
 		scaleRequestChan := make(chan kafkainput.ScaleRequest, 100)
-		receiveFunc, _ := c.newWorker(0, scaleRequestChan)
+		receiveFunc, _ := c.newWorker(0, scaleRequestChan, func(kafkainput.Record) {})
 
 		// Inject 30 flows with rateLimit=20 for the same reception second: 20
 		// are allowed and 10 are dropped.
 		for range 30 {
-			receiveFunc(context.Background(), encodeFlow(flowMessage("192.0.2.144", 434, 677), 20, 1000))
+			receiveFunc(context.Background(), kafkainput.Record{Value: encodeFlow(flowMessage("192.0.2.144", 434, 677), 20, 1000)})
 		}
 
 		gotMetrics := r.GetMetrics("akvorado_outlet_core_",
@@ -251,7 +251,7 @@ func TestCore(t *testing.T) {
 		clickhouseMessagesMutex.Lock()
 		clickhouseMessages = clickhouseMessages[:0]
 		clickhouseMessagesMutex.Unlock()
-		receiveFunc(context.Background(), encodeFlow(flowMessage("192.0.2.144", 434, 677), 20, 1001))
+		receiveFunc(context.Background(), kafkainput.Record{Value: encodeFlow(flowMessage("192.0.2.144", 434, 677), 20, 1001)})
 
 		clickhouseMessagesMutex.Lock()
 		clickhouseMessagesCopy := make([]*schema.FlowMessage, len(clickhouseMessages))

@@ -55,8 +55,9 @@ func (c *realComponent) startOneWorker() error {
 	if err != nil {
 		return err
 	}
-	callback, shutdown := c.workerBuilder(i, c.workerRequestChan)
-	consumer := c.newConsumer(i, callback)
+	consumer := c.newConsumer(i, nil)
+	callback, shutdown := c.workerBuilder(i, c.workerRequestChan, consumer.MarkFlushed)
+	consumer.callback = callback
 
 	// Goroutine for worker
 	done := make(chan bool)
@@ -71,7 +72,13 @@ func (c *realComponent) startOneWorker() error {
 		defer func() {
 			logger.Info().Msg("stopping worker")
 
-			// Allow a small grace time to commit uncommited work.
+			// Flush the last batch first: the shutdown function writes it
+			// and marks the offsets that made it to ClickHouse.
+			shutdown()
+
+			// Then commit the marked offsets only. Committing before the
+			// flush would persist the position of flows still buffered in
+			// memory, making them unrecoverable if the flush fails.
 			ctx, cancelCommit := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancelCommit()
 			if err := client.CommitMarkedOffsets(ctx); err != nil {
@@ -79,7 +86,6 @@ func (c *realComponent) startOneWorker() error {
 			}
 			client.CloseAllowingRebalance()
 
-			shutdown()
 			close(done)
 		}()
 

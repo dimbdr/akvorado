@@ -802,7 +802,7 @@ ClassifyProviderRegex(Interface.Description, "^Transit: ([^ ]+)", "$1")`,
 				t.Fatalf("MarshalVT() error:\n%+v", err)
 			}
 
-			incoming <- data
+			incoming <- kafkainput.Record{Value: data}
 			time.Sleep(100 * time.Millisecond)
 
 			clickhouseMessagesMutex.Lock()

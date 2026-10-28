@@ -19,22 +19,22 @@ func TestMock(t *testing.T) {
 	expected := []string{"hello1", "hello2", "hello3"}
 	gotAll := make(chan bool)
 	var shutdownCalled atomic.Bool
-	callback := func(_ context.Context, message []byte) error {
-		got = append(got, string(message))
+	callback := func(_ context.Context, record Record) error {
+		got = append(got, string(record.Value))
 		if len(got) == len(expected) {
 			close(gotAll)
 		}
 		return nil
 	}
 	c.StartWorkers(
-		func(int, chan<- ScaleRequest) (ReceiveFunc, ShutdownFunc) {
+		func(_ int, _ chan<- ScaleRequest, _ CommitFunc) (ReceiveFunc, ShutdownFunc) {
 			return callback, func() { shutdownCalled.Store(true) }
 		},
 	)
 
 	// Produce messages and wait for them
 	for _, msg := range expected {
-		incoming <- []byte(msg)
+		incoming <- Record{Value: []byte(msg)}
 	}
 	select {
 	case <-time.After(time.Second):
