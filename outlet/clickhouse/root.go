@@ -16,7 +16,11 @@ import (
 
 // Component is the interface for the ClickHouse exporter component.
 type Component interface {
-	NewWorker(int, *schema.FlowMessage) Worker
+	// NewWorker creates a worker. The onFlushed function, when not nil, is
+	// called each time a batch is confirmed written to ClickHouse (or when
+	// there is nothing left to write). Callers use it to commit the Kafka
+	// offsets of the flows they buffered.
+	NewWorker(int, *schema.FlowMessage, func()) Worker
 	// FlushTimeout returns the recommended timeout for the final flush
 	// of a worker on shutdown. Callers should use it as the deadline
 	// for the context passed to Worker.Flush(): the worker honors the

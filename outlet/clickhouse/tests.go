@@ -26,10 +26,11 @@ func NewMock(_ *testing.T, callback func(*schema.FlowMessage)) Component {
 }
 
 // NewWorker creates a new mock worker.
-func (c *mockComponent) NewWorker(_ int, bf *schema.FlowMessage) Worker {
+func (c *mockComponent) NewWorker(_ int, bf *schema.FlowMessage, onFlushed func()) Worker {
 	return &mockWorker{
-		c:  c,
-		bf: bf,
+		c:         c,
+		bf:        bf,
+		onFlushed: onFlushed,
 	}
 }
 
@@ -38,8 +39,9 @@ func (c *mockComponent) FlushTimeout() time.Duration { return time.Second }
 
 // mockWorker is a mock version of the ClickHouse worker.
 type mockWorker struct {
-	c  *mockComponent
-	bf *schema.FlowMessage
+	c         *mockComponent
+	bf        *schema.FlowMessage
+	onFlushed func()
 }
 
 // FinalizeAndSend always "send" the current flows.
@@ -53,6 +55,9 @@ func (w *mockWorker) Flush(_ context.Context) {
 	clone := *w.bf
 	w.c.callback(&clone)
 	w.bf.Clear() // Clear instead of finalizing
+	if w.onFlushed != nil {
+		w.onFlushed()
+	}
 }
 
 // Close is a no-op for the mock worker.

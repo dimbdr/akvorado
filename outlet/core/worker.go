@@ -24,12 +24,13 @@ type worker struct {
 	bf      *schema.FlowMessage
 	rawFlow pb.RawFlow
 
+	tracker          *commitTracker
 	scaleRequestChan chan<- kafkainput.ScaleRequest
 }
 
 // newWorker instantiates a new worker and returns a callback function to
 // process an incoming flow and a function to call on shutdown.
-func (c *Component) newWorker(i int, scaleRequestChan chan<- kafkainput.ScaleRequest) (kafkainput.ReceiveFunc, kafkainput.ShutdownFunc) {
+func (c *Component) newWorker(i int, scaleRequestChan chan<- kafkainput.ScaleRequest, commit kafkainput.CommitFunc) (kafkainput.ReceiveFunc, kafkainput.ShutdownFunc) {
 	bf := c.d.Schema.NewFlowMessage()
 	// Encode enriched flows to Protobuf in parallel with the ClickHouse batch
 	// only when the Kafka output is enabled, so the ClickHouse-only path is
@@ -37,13 +38,16 @@ func (c *Component) newWorker(i int, scaleRequestChan chan<- kafkainput.ScaleReq
 	if c.d.KafkaOutput != nil && c.d.KafkaOutput.Enabled() {
 		bf.EnableProtobuf()
 	}
-	w := worker{
+	w := &worker{
 		c:                c,
 		l:                c.r.With().Int("worker", i).Logger(),
 		bf:               bf,
-		cw:               c.d.ClickHouse.NewWorker(i, bf),
+		tracker:          newCommitTracker(commit),
 		scaleRequestChan: scaleRequestChan,
 	}
+	// The ClickHouse worker reports every successful flush, which is when the
+	// offsets of the buffered flows can be committed.
+	w.cw = c.d.ClickHouse.NewWorker(i, bf, w.tracker.flushed)
 	return w.processIncomingFlow, w.shutdown
 }
 
@@ -64,11 +68,11 @@ func (w *worker) shutdown() {
 }
 
 // processIncomingFlow processes one incoming flow from Kafka.
-func (w *worker) processIncomingFlow(ctx context.Context, data []byte) error {
+func (w *worker) processIncomingFlow(ctx context.Context, record kafkainput.Record) error {
 	// Raw flow decoding
 	w.c.metrics.rawFlowsReceived.Inc()
 	w.rawFlow.ResetVT()
-	if err := w.rawFlow.UnmarshalVT(data); err != nil {
+	if err := w.rawFlow.UnmarshalVT(record.Value); err != nil {
 		w.c.metrics.rawFlowsErrors.WithLabelValues("cannot decode protobuf")
 		return fmt.Errorf("cannot decode raw flow: %w", err)
 	}
@@ -140,6 +144,12 @@ func (w *worker) processIncomingFlow(ctx context.Context, data []byte) error {
 
 	// Flow decoding
 	err := w.c.d.Flow.Decode(&w.rawFlow, w.bf, finalize)
+
+	// The record is processed: its flows are now in the batch buffer (or were
+	// dropped on purpose). Remember its position so the offset is committed
+	// once the batch is confirmed written to ClickHouse.
+	w.tracker.track(record)
+
 	if err != nil {
 		// w.bf.ExporterAddress may not be known yet, so increase raw_flows_errors_total.
 		w.c.metrics.rawFlowsErrors.WithLabelValues("cannot decode payload").Inc()

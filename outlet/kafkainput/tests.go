@@ -12,15 +12,24 @@ import (
 
 type mockComponent struct {
 	config   Configuration
-	incoming chan []byte
+	incoming chan Record
+	commit   CommitFunc
 }
 
 // NewMock instantiates a fake Kafka consumer that will produce messages sent on
 // the returned channel.
-func NewMock(_ *testing.T, config Configuration) (Component, chan<- []byte) {
+func NewMock(t *testing.T, config Configuration) (Component, chan<- Record) {
+	return NewMockWithCommit(t, config, func(Record) {})
+}
+
+// NewMockWithCommit instantiates a fake Kafka consumer that will produce
+// messages sent on the returned channel and report flushed records to the
+// provided commit function.
+func NewMockWithCommit(_ *testing.T, config Configuration, commit CommitFunc) (Component, chan<- Record) {
 	c := mockComponent{
 		config:   config,
-		incoming: make(chan []byte),
+		incoming: make(chan Record),
+		commit:   commit,
 	}
 	return &c, c.incoming
 }
@@ -35,15 +44,15 @@ func (c *mockComponent) StartWorkers(workerBuilder WorkerBuilderFunc) error {
 		}
 	}()
 	for i := range c.config.MinWorkers {
-		callback, shutdown := workerBuilder(i, ch)
+		callback, shutdown := workerBuilder(i, ch, c.commit)
 		go func() {
 			defer shutdown()
 			for {
-				message, ok := <-c.incoming
+				record, ok := <-c.incoming
 				if !ok {
 					return
 				}
-				callback(context.Background(), message)
+				callback(context.Background(), record)
 			}
 		}()
 	}

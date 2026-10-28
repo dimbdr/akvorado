@@ -25,19 +25,35 @@ type Consumer struct {
 	metrics  metrics
 	worker   int
 	callback ReceiveFunc
+	client   *kgo.Client
 }
 
-// ReceiveFunc is a function that will be called with each received messages.
-type ReceiveFunc func(context.Context, []byte) error
+// Record is a message received from Kafka.
+type Record struct {
+	Topic     string
+	Partition int32
+	Epoch     int32
+	Offset    int64
+	Value     []byte
+}
+
+// ReceiveFunc is a function that will be called with each received message.
+type ReceiveFunc func(context.Context, Record) error
 
 // ShutdownFunc is a function that will be called on shutdown of the consumer.
 type ShutdownFunc func()
 
+// CommitFunc is a function to call once the flows of a record are durable.
+// The consumer only commits the offsets of the records reported through this
+// function: a record still sitting in an in-memory batch must not be committed,
+// otherwise a crash or a failed flush loses it forever.
+type CommitFunc func(Record)
+
 // WorkerBuilderFunc returns a function to be called with each received messages
 // and a function to be called when shutting down. It is provided the worker
-// number (for logging purpose) as well as a chan for the worker to request more
-// or less workers.
-type WorkerBuilderFunc func(int, chan<- ScaleRequest) (ReceiveFunc, ShutdownFunc)
+// number (for logging purpose), a chan for the worker to request more or less
+// workers, and the function to call once a record has been flushed.
+type WorkerBuilderFunc func(int, chan<- ScaleRequest, CommitFunc) (ReceiveFunc, ShutdownFunc)
 
 // NewConsumer creates a new consumer.
 func (c *realComponent) newConsumer(worker int, callback ReceiveFunc) *Consumer {
@@ -51,11 +67,28 @@ func (c *realComponent) newConsumer(worker int, callback ReceiveFunc) *Consumer 
 	}
 }
 
+// MarkFlushed records that the flows of the given record have been written to
+// their destination, so its offset can be committed.
+func (c *Consumer) MarkFlushed(record Record) {
+	if c.client == nil {
+		return
+	}
+	c.client.MarkCommitOffsets(map[string]map[int32]kgo.EpochOffset{
+		record.Topic: {
+			record.Partition: kgo.EpochOffset{Epoch: record.Epoch, Offset: record.Offset + 1},
+		},
+	})
+}
+
 // ProcessFetches processes the fetched records.
 func (c *Consumer) ProcessFetches(ctx context.Context, client *kgo.Client, fetches kgo.Fetches) error {
 	if fetches.Empty() {
 		return nil
 	}
+
+	// Keep the client around: offsets are marked from MarkFlushed(), possibly
+	// long after this call returned.
+	c.client = client
 
 	worker := strconv.Itoa(c.worker)
 	c.metrics.fetchesReceived.WithLabelValues(worker).Inc()
@@ -80,32 +113,21 @@ func (c *Consumer) ProcessFetches(ctx context.Context, client *kgo.Client, fetch
 	for _, fetch := range fetches {
 		for _, topic := range fetch.Topics {
 			for _, partition := range topic.Partitions {
-				err := func() error {
-					var epoch int32
-					var offset int64
-					defer func() {
-						client.MarkCommitOffsets(map[string]map[int32]kgo.EpochOffset{
-							topic.Topic: {
-								partition.Partition: kgo.EpochOffset{Epoch: epoch, Offset: offset},
-							},
-						})
-					}()
-					for _, record := range partition.Records {
-						if err := ctx.Err(); err != nil {
-							return err
-						}
-						epoch = record.LeaderEpoch
-						offset = record.Offset + 1
-						messagesReceived.Inc()
-						bytesReceived.Add(float64(len(record.Value)))
-						if err := c.callback(ctx, record.Value); err != nil {
-							return err
-						}
+				for _, record := range partition.Records {
+					if err := ctx.Err(); err != nil {
+						return err
 					}
-					return nil
-				}()
-				if err != nil {
-					return err
+					messagesReceived.Inc()
+					bytesReceived.Add(float64(len(record.Value)))
+					if err := c.callback(ctx, Record{
+						Topic:     topic.Topic,
+						Partition: partition.Partition,
+						Epoch:     record.LeaderEpoch,
+						Offset:    record.Offset,
+						Value:     record.Value,
+					}); err != nil {
+						return err
+					}
 				}
 			}
 		}

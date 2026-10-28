@@ -202,6 +202,83 @@ func TestFlushSelectServerError(t *testing.T) {
 	}
 }
 
+// newFlushWorker builds a worker whose only server is always reachable and
+// whose insert is faked, so Flush can be tested without a ClickHouse server.
+func newFlushWorker(t *testing.T, insertFn func(context.Context, *serverConn, ch.Query) error) (*roundRobinWorker, *realComponent) {
+	t.Helper()
+	r := reporter.NewMock(t)
+	sch := schema.NewMock(t)
+	c := &realComponent{r: r, config: DefaultConfiguration(), d: &Dependencies{Schema: sch}}
+	c.initMetrics()
+	bf := sch.NewFlowMessage()
+	bf.AppendUint(schema.ColumnDstAS, 65000)
+	bf.AppendUint(schema.ColumnBytes, 200)
+	bf.Finalize()
+
+	w := newRoundRobin([]string{"s0"}, func(context.Context, *serverConn) error { return nil })
+	w.c = c
+	w.bf = bf
+	w.logger = r.With().Logger()
+	w.insertFn = insertFn
+	return w, c
+}
+
+// TestFlushOnFlushedOnlyOnSuccess checks the flush hook is only called once the
+// batch is confirmed written to ClickHouse: callers rely on it to commit Kafka
+// offsets, so calling it on a failed flush would lose the batch forever.
+func TestFlushOnFlushedOnlyOnSuccess(t *testing.T) {
+	flushed := 0
+	w, _ := newFlushWorker(t, func(context.Context, *serverConn, ch.Query) error { return nil })
+	w.onFlushed = func() { flushed++ }
+
+	w.Flush(t.Context())
+
+	if flushed != 1 {
+		t.Errorf("onFlushed called %d times after a successful flush, want 1", flushed)
+	}
+	if diff := helpers.Diff(w.bf.FlowCount(), 0); diff != "" {
+		t.Errorf("FlowCount() after a successful flush (-got, +want):\n%s", diff)
+	}
+}
+
+func TestFlushOnFlushedNotCalledOnFailure(t *testing.T) {
+	flushed := 0
+	w, _ := newFlushWorker(t, func(context.Context, *serverConn, ch.Query) error {
+		return errors.New("insert failed")
+	})
+	w.onFlushed = func() { flushed++ }
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	w.Flush(ctx)
+
+	if flushed != 0 {
+		t.Errorf("onFlushed called %d times after a failed flush, want 0", flushed)
+	}
+	if diff := helpers.Diff(w.bf.FlowCount(), 1); diff != "" {
+		t.Errorf("FlowCount() after a failed flush (-got, +want):\n%s", diff)
+	}
+}
+
+// TestFlushOnFlushedEmptyBuffer checks an empty flush still calls the hook: the
+// records tracked since the last flush were either already written or
+// deliberately dropped, so their offsets can be committed.
+func TestFlushOnFlushedEmptyBuffer(t *testing.T) {
+	flushed := 0
+	w, _ := newFlushWorker(t, func(context.Context, *serverConn, ch.Query) error {
+		t.Fatal("insert called on an empty batch")
+		return nil
+	})
+	w.onFlushed = func() { flushed++ }
+	w.bf.Clear()
+
+	w.Flush(t.Context())
+
+	if flushed != 1 {
+		t.Errorf("onFlushed called %d times on an empty flush, want 1", flushed)
+	}
+}
+
 func TestConnectErrorMetric(t *testing.T) {
 	r := reporter.NewMock(t)
 	c := &realComponent{r: r, config: DefaultConfiguration()}
@@ -278,7 +355,7 @@ func TestClose(t *testing.T) {
 	}
 	helpers.StartStop(t, c)
 
-	w := c.NewWorker(0, sch.NewFlowMessage()).(*roundRobinWorker)
+	w := c.NewWorker(0, sch.NewFlowMessage(), nil).(*roundRobinWorker)
 	openConns := func() int {
 		n := 0
 		for _, sc := range w.servers {

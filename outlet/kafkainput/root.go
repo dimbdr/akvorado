@@ -176,9 +176,18 @@ func (c *realComponent) StartWorkers(workerBuilder WorkerBuilderFunc) error {
 func (c *realComponent) StopWorkers() {
 	c.workerMu.Lock()
 	defer c.workerMu.Unlock()
+	// Stop every worker concurrently: each one may wait for its ClickHouse
+	// grace period to flush its last batch, and stopping them sequentially
+	// would exceed the pod termination grace period.
+	var wg sync.WaitGroup
 	for _, worker := range c.workers {
-		worker.stop()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			worker.stop()
+		}()
 	}
+	wg.Wait()
 }
 
 // Stop stops the Kafka component
