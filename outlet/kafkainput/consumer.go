@@ -43,17 +43,24 @@ type ReceiveFunc func(context.Context, Record) error
 // ShutdownFunc is a function that will be called on shutdown of the consumer.
 type ShutdownFunc func()
 
+// RevokeFunc is a function called when partitions are revoked, before they are
+// handed to another member. Implementations must forget the positions tracked
+// for these partitions: committing them later would move the group's committed
+// offset backwards.
+type RevokeFunc func(map[string][]int32)
+
 // CommitFunc is a function to call once the flows of a record are durable.
 // The consumer only commits the offsets of the records reported through this
 // function: a record still sitting in an in-memory batch must not be committed,
 // otherwise a crash or a failed flush loses it forever.
 type CommitFunc func(Record)
 
-// WorkerBuilderFunc returns a function to be called with each received messages
-// and a function to be called when shutting down. It is provided the worker
-// number (for logging purpose), a chan for the worker to request more or less
-// workers, and the function to call once a record has been flushed.
-type WorkerBuilderFunc func(int, chan<- ScaleRequest, CommitFunc) (ReceiveFunc, ShutdownFunc)
+// WorkerBuilderFunc returns a function to be called with each received messages,
+// a function to be called when shutting down, and a function to be called when
+// partitions are revoked. It is provided the worker number (for logging
+// purpose), a chan for the worker to request more or less workers, and the
+// function to call once a record has been flushed.
+type WorkerBuilderFunc func(int, chan<- ScaleRequest, CommitFunc) (ReceiveFunc, ShutdownFunc, RevokeFunc)
 
 // NewConsumer creates a new consumer.
 func (c *realComponent) newConsumer(worker int, callback ReceiveFunc) *Consumer {

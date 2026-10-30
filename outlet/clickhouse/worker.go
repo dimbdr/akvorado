@@ -78,9 +78,9 @@ type commonWorker struct {
 }
 
 // FlushTimeout returns the recommended deadline for the final flush on
-// shutdown. It is the configured grace period plus a small margin: the
-// worker waits for the grace period once its parent context is done,
-// so the parent needs to outlive it for a retry to be possible.
+// shutdown: the configured grace period plus a small margin for the last
+// retry. The flush never outlives the context it is given, so this deadline
+// is also the worst-case time spent flushing on shutdown.
 func (c *realComponent) FlushTimeout() time.Duration {
 	return c.config.GracePeriod + 10*time.Second
 }
@@ -166,7 +166,9 @@ func (w *commonWorker) FinalizeAndSend(ctx context.Context) WorkerStatus {
 
 // Flush sends remaining data to ClickHouse without an additional condition. It
 // should be called before shutting down to flush remaining data. Otherwise,
-// FinalizeAndSend() should be used instead.
+// FinalizeAndSend() should be used instead. The flush stops when ctx expires;
+// callers that need a grace period must pass a context with that deadline (see
+// FlushTimeout).
 func (w *commonWorker) Flush(ctx context.Context) {
 	var useAsync bool
 	if w.bf.FlowCount() == 0 {
@@ -183,45 +185,18 @@ func (w *commonWorker) Flush(ctx context.Context) {
 		settings = w.asyncSettings
 	}
 
-	// We try to send as long as possible. The only exit condition is an
-	// expiration of the context.
+	// We try to send as long as possible, but never past the context deadline:
+	// the caller sizes it for the shutdown (FlushTimeout) and a retry must not
+	// extend it. A flush still in flight when the outlet stops is abandoned and
+	// retried by the final shutdown flush, which has its own budget.
 	b := backoff.NewExponentialBackOff()
 	b.MaxInterval = 30 * time.Second
 	b.InitialInterval = 20 * time.Millisecond
 	if _, err := backoff.Retry(ctx, func() (any, error) {
-		// Ensure the context lives for at least GracePeriod. Picking a server and
-		// connecting to it share it with the insert, otherwise a parent context
-		// about to expire leaves no time to reach any server.
-		chCtx, cancel := context.WithCancel(context.Background())
-		defer cancel() // needed in case the operation completes before grace period and parent context
-		go func() {
-			gracePeriodTimer := time.NewTimer(w.c.config.GracePeriod)
-			defer gracePeriodTimer.Stop()
-
-			select {
-			case <-gracePeriodTimer.C:
-				// Grace period elapsed, now wait for parent or end of operation.
-				select {
-				case <-ctx.Done():
-				case <-chCtx.Done():
-				}
-			case <-ctx.Done():
-				// Parent done before grace period, wait for grace period or end of operation.
-				select {
-				case <-gracePeriodTimer.C:
-					w.logger.Info().Msg("grace period to flush batch expired")
-				case <-chCtx.Done():
-				}
-			case <-chCtx.Done():
-				// Operation done!
-			}
-			cancel()
-		}()
-
 		// Pick a server (per the configured strategy) and (re)connect if needed.
 		// Depending on the strategy each batch may land on a different server
 		// (round-robin) or stay on the pinned one (sticky-random).
-		sc, err := w.selectServer(chCtx)
+		sc, err := w.selectServer(ctx)
 		if err != nil {
 			w.logger.Err(err).Msg("cannot connect to any ClickHouse server")
 			return nil, err
@@ -229,7 +204,7 @@ func (w *commonWorker) Flush(ctx context.Context) {
 
 		// Send to ClickHouse in flows_XXXXX_raw.
 		start := time.Now()
-		if err := w.insertFn(chCtx, sc, ch.Query{
+		if err := w.insertFn(ctx, sc, ch.Query{
 			Body:     w.bf.ClickHouseProtoInput().Into(fmt.Sprintf("flows_%s_raw", w.c.d.Schema.ClickHouseHash())),
 			Input:    w.bf.ClickHouseProtoInput(),
 			Settings: settings,

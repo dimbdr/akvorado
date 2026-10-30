@@ -79,7 +79,6 @@ func New(r *reporter.Reporter, configuration Configuration, dependencies Depende
 		kgo.ConsumeTopics(fmt.Sprintf("%s-v%d", configuration.Topic, pb.Version)),
 		kgo.AutoCommitMarks(),
 		kgo.AutoCommitInterval(time.Second),
-		kgo.OnPartitionsRevoked(c.onPartitionsRevoked),
 		kgo.BlockRebalanceOnPoll(),
 	)
 
