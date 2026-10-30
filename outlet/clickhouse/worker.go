@@ -224,7 +224,9 @@ func (w *commonWorker) Flush(ctx context.Context) {
 		w.flushed()
 		return nil, nil
 	}, backoff.WithBackOff(b), backoff.WithMaxElapsedTime(0)); err != nil {
-		w.logger.Err(err).Int("flows", w.bf.FlowCount()).Msg("batch lost, cannot flush to ClickHouse")
+		// The offsets stay uncommitted: Kafka re-delivers the batch on the
+		// next start instead of losing it.
+		w.logger.Err(err).Int("flows", w.bf.FlowCount()).Msg("cannot flush batch to ClickHouse, it will be replayed from Kafka")
 		w.c.metrics.errors.WithLabelValues("flush").Inc()
 	}
 }
