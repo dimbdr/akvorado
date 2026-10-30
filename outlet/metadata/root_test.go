@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"testing"
 	"testing/synctest"
@@ -122,6 +123,38 @@ func TestComponentSaveLoad(t *testing.T) {
 			},
 		})
 	})
+}
+
+func TestComponentPeriodicSave(t *testing.T) {
+	configuration := DefaultConfiguration()
+	configuration.CachePersistFile = filepath.Join(t.TempDir(), "cache")
+	configuration.CacheCheckInterval = 10 * time.Millisecond
+	r := reporter.NewMock(t)
+	c := NewMock(t, r, configuration, Dependencies{Daemon: daemon.NewMock(t)})
+	expectMockLookup(t, c, "127.0.0.1", 765, provider.Answer{
+		Found: true,
+		Exporter: provider.Exporter{
+			Name: "127_0_0_1",
+		},
+		Interface: provider.Interface{
+			Name:        "Gi0/0/765",
+			Description: "Interface 765",
+			Speed:       1000,
+		},
+	})
+
+	// The cache must be written without stopping the component: a killed
+	// process never gets the chance to run Stop().
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(configuration.CachePersistFile); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("cache was not saved periodically")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func TestAutoRefresh(t *testing.T) {

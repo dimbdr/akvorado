@@ -156,6 +156,14 @@ func (c *Component) Start() error {
 				}
 			case <-ticker.C:
 				c.expireCache()
+				// Persist the cache periodically, not only on shutdown: an OOM
+				// kill never runs Stop(), and the next instance would drop flows
+				// for "metadata missing" until the providers answer again.
+				if c.config.CachePersistFile != "" {
+					if err := c.sc.Save(c.config.CachePersistFile); err != nil {
+						c.r.Err(err).Msg("cannot save cache")
+					}
+				}
 			}
 		}
 	})

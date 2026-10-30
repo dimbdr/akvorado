@@ -7,6 +7,8 @@ package flow
 import (
 	"time"
 
+	"gopkg.in/tomb.v2"
+
 	"akvorado/common/pb"
 	"akvorado/common/reporter"
 	"akvorado/outlet/flow/decoder"
@@ -18,6 +20,7 @@ type Component struct {
 	d         *Dependencies
 	config    Configuration
 	errLogger reporter.Logger
+	t         tomb.Tomb
 
 	metrics struct {
 		decoderStats  *reporter.CounterVec
@@ -73,6 +76,24 @@ func (c *Component) Start() error {
 		} else {
 			c.r.Info().Msg("previous decoders' state loaded")
 		}
+
+		// Save the state periodically, not only on shutdown: an OOM kill or any
+		// other SIGKILL never runs Stop(), leaving the next instance without the
+		// templates and sampling rates learned so far.
+		c.t.Go(func() error {
+			ticker := time.NewTicker(c.config.StatePersistInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-c.t.Dying():
+					return nil
+				case <-ticker.C:
+					if err := c.SaveState(c.config.StatePersistFile); err != nil {
+						c.r.Err(err).Msg("cannot save decoders' state")
+					}
+				}
+			}
+		})
 	}
 	return nil
 }
@@ -80,6 +101,10 @@ func (c *Component) Start() error {
 // Stop stops the flow component
 func (c *Component) Stop() error {
 	if c.config.StatePersistFile != "" {
+		c.t.Kill(nil)
+		if err := c.t.Wait(); err != nil {
+			c.r.Err(err).Msg("cannot stop decoders' state saver")
+		}
 		if err := c.SaveState(c.config.StatePersistFile); err != nil {
 			c.r.Err(err).Msg("cannot save decorders' state")
 		}

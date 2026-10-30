@@ -109,9 +109,41 @@ func (t *templates) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// MarshalJSON encodes the templates and sampling rates of an exporter. The
+// state is saved concurrently with decoding, so both maps must be locked.
+func (t *templatesAndOptions) MarshalJSON() ([]byte, error) {
+	t.templateLock.RLock()
+	defer t.templateLock.RUnlock()
+	t.samplingRateLock.RLock()
+	defer t.samplingRateLock.RUnlock()
+	templatesCopy := t.Templates
+	return json.Marshal(&struct {
+		Key           string
+		Templates     *templates
+		SamplingRates map[samplingRateKey]uint32
+	}{
+		Key:           t.Key,
+		Templates:     &templatesCopy,
+		SamplingRates: t.SamplingRates,
+	})
+}
+
+// MarshalJSON encodes the collection of templates and options. A snapshot of
+// the exporters is taken under the collection lock, then each exporter is
+// encoded while holding its own locks.
+func (c *templateAndOptionCollection) MarshalJSON() ([]byte, error) {
+	c.lock.Lock()
+	snapshot := make(map[string]*templatesAndOptions, len(c.Collection))
+	for key, tao := range c.Collection {
+		snapshot[key] = tao
+	}
+	c.lock.Unlock()
+	return json.Marshal(snapshot)
+}
+
 // MarshalJSON encodes the NetFlow decoder's collection.
 func (nd *Decoder) MarshalJSON() ([]byte, error) {
-	return json.Marshal(&nd.collection.Collection)
+	return nd.collection.MarshalJSON()
 }
 
 // UnmarshalJSON decodes the NetFlow decoder's collection.

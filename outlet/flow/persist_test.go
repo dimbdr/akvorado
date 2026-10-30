@@ -4,6 +4,7 @@
 package flow
 
 import (
+	"bytes"
 	"errors"
 	"net"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -86,6 +88,193 @@ func TestSaveAndRestore(t *testing.T) {
 	if len(got) == 0 {
 		t.Fatalf("Decode() returned no flows")
 	}
+}
+
+func TestPeriodicSave(t *testing.T) {
+	r := reporter.NewMock(t)
+	sch := schema.NewMock(t)
+	config := DefaultConfiguration()
+	config.StatePersistFile = filepath.Join(t.TempDir(), "state")
+	config.StatePersistInterval = 10 * time.Millisecond
+	c, err := New(r, config, Dependencies{Schema: sch})
+	if err != nil {
+		t.Fatalf("New() error:\n%+v", err)
+	}
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start() error:\n%+v", err)
+	}
+	defer c.Stop()
+
+	bf := sch.NewFlowMessage()
+	_, src, _, _ := runtime.Caller(0)
+	base := path.Join(path.Dir(src), "decoder", "netflow", "testdata")
+	packets := slices.Collect(helpers.ReadManyPcapL4(t, path.Join(base, "nfv9.pcap")))
+	for _, data := range packets[:len(packets)-1] {
+		rawFlow := &pb.RawFlow{
+			TimeReceived:     uint64(time.Now().UnixNano()),
+			Payload:          data,
+			SourceAddress:    net.ParseIP("127.0.0.1").To16(),
+			UseSourceAddress: false,
+			Decoder:          pb.RawFlow_DECODER_NETFLOW,
+			TimestampSource:  pb.RawFlow_TS_INPUT,
+		}
+		if err := c.Decode(rawFlow, bf, func() {}); err != nil {
+			t.Fatalf("Decode() error:\n%+v", err)
+		}
+	}
+
+	// The state must be written without calling Stop().
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, err := os.ReadFile(config.StatePersistFile)
+		if err == nil && bytes.Contains(data, []byte(`"Key"`)) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("state file was not saved periodically (err: %v)", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestPeriodicSaveSurvivesKill(t *testing.T) {
+	// A killed process never runs Stop(): the state must have been saved
+	// periodically for the next instance to reuse it.
+	r := reporter.NewMock(t)
+	sch := schema.NewMock(t)
+	config := DefaultConfiguration()
+	config.StatePersistFile = filepath.Join(t.TempDir(), "state")
+	config.StatePersistInterval = 10 * time.Millisecond
+	c, err := New(r, config, Dependencies{Schema: sch})
+	if err != nil {
+		t.Fatalf("New() error:\n%+v", err)
+	}
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start() error:\n%+v", err)
+	}
+
+	bf := sch.NewFlowMessage()
+	_, src, _, _ := runtime.Caller(0)
+	base := path.Join(path.Dir(src), "decoder", "netflow", "testdata")
+	packets := slices.Collect(helpers.ReadManyPcapL4(t, path.Join(base, "nfv9.pcap")))
+	for _, data := range packets[:len(packets)-1] {
+		rawFlow := &pb.RawFlow{
+			TimeReceived:     uint64(time.Now().UnixNano()),
+			Payload:          data,
+			SourceAddress:    net.ParseIP("127.0.0.1").To16(),
+			UseSourceAddress: false,
+			Decoder:          pb.RawFlow_DECODER_NETFLOW,
+			TimestampSource:  pb.RawFlow_TS_INPUT,
+		}
+		if err := c.Decode(rawFlow, bf, func() {}); err != nil {
+			t.Fatalf("Decode() error:\n%+v", err)
+		}
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, err := os.ReadFile(config.StatePersistFile)
+		if err == nil && bytes.Contains(data, []byte(`"Key"`)) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("state file was not saved periodically (err: %v)", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Start a second instance from the periodically-saved state, without ever
+	// stopping the first one.
+	r2 := reporter.NewMock(t)
+	c2, err := New(r2, config, Dependencies{Schema: sch})
+	if err != nil {
+		t.Fatalf("New() error:\n%+v", err)
+	}
+	if err := c2.Start(); err != nil {
+		t.Fatalf("Start() error:\n%+v", err)
+	}
+	defer c2.Stop()
+
+	got := []*schema.FlowMessage{}
+	rawFlow := &pb.RawFlow{
+		TimeReceived:     uint64(time.Now().UnixNano()),
+		Payload:          packets[len(packets)-1],
+		SourceAddress:    net.ParseIP("127.0.0.1").To16(),
+		UseSourceAddress: false,
+		Decoder:          pb.RawFlow_DECODER_NETFLOW,
+		TimestampSource:  pb.RawFlow_TS_INPUT,
+	}
+	if err := c2.Decode(rawFlow, bf, func() {
+		clone := *bf
+		got = append(got, &clone)
+		bf.Finalize()
+	}); err != nil {
+		t.Fatalf("Decode() error:\n%+v", err)
+	}
+	if len(got) == 0 {
+		t.Fatalf("Decode() returned no flows")
+	}
+
+	if err := c.Stop(); err != nil {
+		t.Fatalf("Stop() error:\n%+v", err)
+	}
+}
+
+func TestSaveStateConcurrentWithDecode(t *testing.T) {
+	r := reporter.NewMock(t)
+	sch := schema.NewMock(t)
+	config := DefaultConfiguration()
+	config.StatePersistFile = filepath.Join(t.TempDir(), "state")
+	config.StatePersistInterval = time.Hour
+	c, err := New(r, config, Dependencies{Schema: sch})
+	if err != nil {
+		t.Fatalf("New() error:\n%+v", err)
+	}
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start() error:\n%+v", err)
+	}
+	defer c.Stop()
+
+	bf := sch.NewFlowMessage()
+	_, src, _, _ := runtime.Caller(0)
+	base := path.Join(path.Dir(src), "decoder", "netflow", "testdata")
+	packets := slices.Collect(helpers.ReadManyPcapL4(t, path.Join(base, "nfv9.pcap")))
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				if err := c.SaveState(config.StatePersistFile); err != nil {
+					t.Errorf("SaveState() error:\n%+v", err)
+					return
+				}
+			}
+		}
+	}()
+
+	for i := 0; i < 20; i++ {
+		for _, data := range packets {
+			rawFlow := &pb.RawFlow{
+				TimeReceived:     uint64(time.Now().UnixNano()),
+				Payload:          data,
+				SourceAddress:    net.ParseIP("127.0.0.1").To16(),
+				UseSourceAddress: false,
+				Decoder:          pb.RawFlow_DECODER_NETFLOW,
+				TimestampSource:  pb.RawFlow_TS_INPUT,
+			}
+			if err := c.Decode(rawFlow, bf, func() {}); err != nil {
+				t.Fatalf("Decode() error:\n%+v", err)
+			}
+		}
+	}
+	close(done)
+	wg.Wait()
 }
 
 func TestRestoreCorruptedFile(t *testing.T) {
