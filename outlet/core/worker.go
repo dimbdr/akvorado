@@ -6,7 +6,6 @@ package core
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"sync/atomic"
 
 	"akvorado/common/pb"
@@ -29,8 +28,9 @@ type worker struct {
 }
 
 // newWorker instantiates a new worker and returns a callback function to
-// process an incoming flow and a function to call on shutdown.
-func (c *Component) newWorker(i int, scaleRequestChan chan<- kafkainput.ScaleRequest, commit kafkainput.CommitFunc) (kafkainput.ReceiveFunc, kafkainput.ShutdownFunc) {
+// process an incoming flow, a function to call on shutdown, and a function to
+// call when partitions are revoked.
+func (c *Component) newWorker(i int, scaleRequestChan chan<- kafkainput.ScaleRequest, commit kafkainput.CommitFunc) (kafkainput.ReceiveFunc, kafkainput.ShutdownFunc, kafkainput.RevokeFunc) {
 	bf := c.d.Schema.NewFlowMessage()
 	// Encode enriched flows to Protobuf in parallel with the ClickHouse batch
 	// only when the Kafka output is enabled, so the ClickHouse-only path is
@@ -48,7 +48,7 @@ func (c *Component) newWorker(i int, scaleRequestChan chan<- kafkainput.ScaleReq
 	// The ClickHouse worker reports every successful flush, which is when the
 	// offsets of the buffered flows can be committed.
 	w.cw = c.d.ClickHouse.NewWorker(i, bf, w.tracker.flushed)
-	return w.processIncomingFlow, w.shutdown
+	return w.processIncomingFlow, w.shutdown, w.tracker.forget
 }
 
 // shutdown shutdowns the worker, flushing any remaining data and releasing its
@@ -56,10 +56,9 @@ func (c *Component) newWorker(i int, scaleRequestChan chan<- kafkainput.ScaleReq
 func (w *worker) shutdown() {
 	w.l.Info().Msg("flush final batch to ClickHouse")
 	// Use the ClickHouse component's recommended flush timeout (the
-	// configured grace period plus a margin) instead of a fixed short
-	// deadline: the worker only honors the grace period while the
-	// provided context is alive, so a 10s deadline here made the
-	// grace period ineffective and dropped the final batch.
+	// configured grace period plus a margin): the flush stops when this
+	// context expires, so the deadline is the whole budget for the final
+	// batch.
 	ctx, cancel := context.WithTimeout(context.Background(), w.c.d.ClickHouse.FlushTimeout())
 	defer cancel()
 	w.cw.Flush(ctx)
@@ -73,8 +72,14 @@ func (w *worker) processIncomingFlow(ctx context.Context, record kafkainput.Reco
 	w.c.metrics.rawFlowsReceived.Inc()
 	w.rawFlow.ResetVT()
 	if err := w.rawFlow.UnmarshalVT(record.Value); err != nil {
-		w.c.metrics.rawFlowsErrors.WithLabelValues("cannot decode protobuf")
-		return fmt.Errorf("cannot decode raw flow: %w", err)
+		// Skip the record like any other undecodable payload instead of
+		// failing the worker: its offset is tracked so it is committed once
+		// the current batch is durable. Returning an error here would stop the
+		// component and re-read the same record forever after a restart.
+		w.c.metrics.rawFlowsErrors.WithLabelValues("cannot decode protobuf").Inc()
+		w.tracker.track(record)
+		w.l.Err(err).Msg("cannot decode raw flow")
+		return nil
 	}
 
 	// Process each decoded flow

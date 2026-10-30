@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/rs/zerolog"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/plugin/kprom"
 )
@@ -23,12 +24,19 @@ type worker struct {
 }
 
 // newClient returns a new Kafka client
-func (c *realComponent) newClient(i int) (*kgo.Client, error) {
+func (c *realComponent) newClient(i int, revoke RevokeFunc) (*kgo.Client, error) {
 	logger := c.r.With().Int("worker", i).Logger()
 	logger.Info().Msg("starting new client")
 
 	kmetrics := kprom.NewMetrics("", kprom.WithStaticLabel(prometheus.Labels{"worker": strconv.Itoa(i)}))
-	kafkaOpts := append(c.kafkaOpts, kgo.WithHooks(kmetrics))
+	kafkaOpts := append([]kgo.Opt{}, c.kafkaOpts...)
+	kafkaOpts = append(kafkaOpts,
+		kgo.WithHooks(kmetrics),
+		// kgo replaces the callback instead of chaining them, so the
+		// component-level callback cannot be used: each client commits its
+		// marked offsets and then tells its own worker to forget the revoked
+		// partitions.
+		kgo.OnPartitionsRevoked(onPartitionsRevoked(logger, revoke)))
 
 	client, err := kgo.NewClient(kafkaOpts...)
 	if err != nil {
@@ -44,6 +52,20 @@ func (c *realComponent) newClient(i int) (*kgo.Client, error) {
 	return client, nil
 }
 
+// onPartitionsRevoked commits the offsets already marked, then tells the worker
+// to forget the revoked partitions. Committing them later would move the
+// group's committed offset backwards once another member owns them.
+func onPartitionsRevoked(logger zerolog.Logger, revoke RevokeFunc) func(context.Context, *kgo.Client, map[string][]int32) {
+	return func(ctx context.Context, client *kgo.Client, revoked map[string][]int32) {
+		if err := client.CommitMarkedOffsets(ctx); err != nil {
+			logger.Err(err).Msg("cannot commit marked offsets on partition revoked")
+		}
+		if revoke != nil {
+			revoke(revoked)
+		}
+	}
+}
+
 // startOneWorker starts a new worker.
 func (c *realComponent) startOneWorker() error {
 	c.workerMu.Lock()
@@ -51,13 +73,13 @@ func (c *realComponent) startOneWorker() error {
 
 	// New consumer
 	i := len(c.workers)
-	client, err := c.newClient(i)
+	consumer := c.newConsumer(i, nil)
+	callback, shutdown, revoke := c.workerBuilder(i, c.workerRequestChan, consumer.MarkFlushed)
+	consumer.callback = callback
+	client, err := c.newClient(i, revoke)
 	if err != nil {
 		return err
 	}
-	consumer := c.newConsumer(i, nil)
-	callback, shutdown := c.workerBuilder(i, c.workerRequestChan, consumer.MarkFlushed)
-	consumer.callback = callback
 
 	// Goroutine for worker
 	done := make(chan bool)
@@ -71,17 +93,7 @@ func (c *realComponent) startOneWorker() error {
 		pprof.SetGoroutineLabels(pprof.WithLabels(context.Background(), labels))
 		defer func() {
 			logger.Info().Msg("stopping worker")
-
-			// Flush the last batch first: the shutdown function writes it
-			// and marks the offsets that made it to ClickHouse.
-			shutdown()
-
-			// Then commit the marked offsets only. Committing before the
-			// flush would persist the position of flows still buffered in
-			// memory, making them unrecoverable if the flush fails.
-			ctx, cancelCommit := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancelCommit()
-			if err := client.CommitMarkedOffsets(ctx); err != nil {
+			if err := stopWorker(shutdown, client.CommitMarkedOffsets); err != nil {
 				logger.Err(err).Msg("cannot commit marked partition offsets")
 			}
 			client.CloseAllowingRebalance()
@@ -121,6 +133,17 @@ func (c *realComponent) startOneWorker() error {
 	return nil
 }
 
+// stopWorker flushes the worker's last batch, then commits the offsets the
+// flush marked. The order matters: committing before the flush would persist
+// the position of flows still buffered in memory, making them unrecoverable if
+// the flush fails.
+func stopWorker(shutdown ShutdownFunc, commit func(context.Context) error) error {
+	shutdown()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return commit(ctx)
+}
+
 // stopOneWorker stops the last worker
 func (c *realComponent) stopOneWorker() {
 	c.workerMu.Lock()
@@ -135,11 +158,4 @@ func (c *realComponent) stopOneWorker() {
 	c.kafkaMetrics = c.kafkaMetrics[:i]
 
 	c.metrics.workerDecrease.Inc()
-}
-
-// onPartitionsRevoked is called when partitions are revoked. We need to commit.
-func (c *realComponent) onPartitionsRevoked(ctx context.Context, client *kgo.Client, _ map[string][]int32) {
-	if err := client.CommitMarkedOffsets(ctx); err != nil {
-		c.r.Err(err).Msg("cannot commit marked offsets on partition revoked")
-	}
 }

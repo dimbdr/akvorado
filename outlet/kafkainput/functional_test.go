@@ -84,8 +84,8 @@ func TestFakeKafka(t *testing.T) {
 		Observe: true,
 		Count:   -1,
 	})
-	c.StartWorkers(func(_ int, _ chan<- ScaleRequest, _ CommitFunc) (ReceiveFunc, ShutdownFunc) {
-		return callback, func() { shutdownCalled = true }
+	c.StartWorkers(func(_ int, _ chan<- ScaleRequest, _ CommitFunc) (ReceiveFunc, ShutdownFunc, RevokeFunc) {
+		return callback, func() { shutdownCalled = true }, nil
 	})
 
 	// Send messages once the consumer is fetching
@@ -167,8 +167,8 @@ func TestStartSeveralWorkers(t *testing.T) {
 	if err := c.(*realComponent).Start(); err != nil {
 		t.Fatalf("Start() error:\n%+v", err)
 	}
-	c.StartWorkers(func(_ int, _ chan<- ScaleRequest, _ CommitFunc) (ReceiveFunc, ShutdownFunc) {
-		return func(context.Context, Record) error { return nil }, func() {}
+	c.StartWorkers(func(_ int, _ chan<- ScaleRequest, _ CommitFunc) (ReceiveFunc, ShutdownFunc, RevokeFunc) {
+		return func(context.Context, Record) error { return nil }, func() {}, nil
 	})
 	time.Sleep(20 * time.Millisecond)
 	if err := c.Stop(); err != nil {
@@ -214,7 +214,7 @@ func TestWorkerStop(t *testing.T) {
 
 	var last int
 	done := make(chan bool)
-	c.StartWorkers(func(_ int, _ chan<- ScaleRequest, commit CommitFunc) (ReceiveFunc, ShutdownFunc) {
+	c.StartWorkers(func(_ int, _ chan<- ScaleRequest, commit CommitFunc) (ReceiveFunc, ShutdownFunc, RevokeFunc) {
 		return func(_ context.Context, record Record) error {
 				last, _ = strconv.Atoi(string(record.Value))
 				// Simulate a successful flush: the record is durable, so its
@@ -223,7 +223,7 @@ func TestWorkerStop(t *testing.T) {
 				return nil
 			}, func() {
 				close(done)
-			}
+			}, nil
 	})
 	time.Sleep(50 * time.Millisecond)
 
@@ -359,7 +359,7 @@ func TestWorkerScaling(t *testing.T) {
 		Observe: true,
 		Count:   -1,
 	})
-	c.StartWorkers(func(_ int, ch chan<- ScaleRequest, _ CommitFunc) (ReceiveFunc, ShutdownFunc) {
+	c.StartWorkers(func(_ int, ch chan<- ScaleRequest, _ CommitFunc) (ReceiveFunc, ShutdownFunc, RevokeFunc) {
 		return func(context.Context, Record) error {
 			c := msg.Add(1)
 			if c <= 1 {
@@ -370,7 +370,7 @@ func TestWorkerScaling(t *testing.T) {
 				ch <- ScaleDecrease
 			}
 			return nil
-		}, func() {}
+		}, func() {}, nil
 	})
 
 	// 1 worker, wait for it to fetch
@@ -500,7 +500,7 @@ func TestKafkaLagMetric(t *testing.T) {
 	workerReceived := make(chan any, 10)
 	workerBlockReceive := make(chan any)
 	defer close(workerBlockReceive)
-	c.StartWorkers(func(_ int, _ chan<- ScaleRequest, commit CommitFunc) (ReceiveFunc, ShutdownFunc) {
+	c.StartWorkers(func(_ int, _ chan<- ScaleRequest, commit CommitFunc) (ReceiveFunc, ShutdownFunc, RevokeFunc) {
 		return func(_ context.Context, record Record) error {
 			t.Log("worker received a message")
 			workerReceived <- nil
@@ -508,7 +508,7 @@ func TestKafkaLagMetric(t *testing.T) {
 			// The record is now considered durable.
 			commit(record)
 			return nil
-		}, func() {}
+		}, func() {}, nil
 	})
 	waitReceive := func() {
 		t.Helper()

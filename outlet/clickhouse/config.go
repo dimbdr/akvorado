@@ -25,7 +25,7 @@ const (
 
 // Configuration describes the configuration for the ClickHouse exporter.
 type Configuration struct {
-	// GracePeriod defines how long to wait for flushing a batch to ClickHouse on shutdown.
+	// GracePeriod defines the budget for flushing the remaining batch to ClickHouse on shutdown.
 	GracePeriod time.Duration `validate:"min=10s"`
 	// MaximumBatchSize is the maximum number of rows to send to ClickHouse in one batch.
 	MaximumBatchSize uint `validate:"min=1"`

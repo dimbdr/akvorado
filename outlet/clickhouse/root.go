@@ -23,9 +23,8 @@ type Component interface {
 	NewWorker(int, *schema.FlowMessage, func()) Worker
 	// FlushTimeout returns the recommended timeout for the final flush
 	// of a worker on shutdown. Callers should use it as the deadline
-	// for the context passed to Worker.Flush(): the worker honors the
-	// grace period on its own, but only while the provided context is
-	// still alive.
+	// for the context passed to Worker.Flush(): the flush stops when
+	// that context expires.
 	FlushTimeout() time.Duration
 }
 

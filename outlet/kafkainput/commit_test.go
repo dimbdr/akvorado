@@ -90,12 +90,12 @@ func TestOffsetsCommittedOnlyAfterFlush(t *testing.T) {
 	})
 	received := make(chan Record, 1)
 	var commit CommitFunc
-	c.StartWorkers(func(_ int, _ chan<- ScaleRequest, commitFn CommitFunc) (ReceiveFunc, ShutdownFunc) {
+	c.StartWorkers(func(_ int, _ chan<- ScaleRequest, commitFn CommitFunc) (ReceiveFunc, ShutdownFunc, RevokeFunc) {
 		commit = commitFn
 		return func(_ context.Context, record Record) error {
 			received <- record
 			return nil
-		}, func() {}
+		}, func() {}, nil
 	})
 	fetchCtx, fetchCancel := context.WithTimeout(t.Context(), time.Second)
 	defer fetchCancel()

@@ -381,3 +381,24 @@ func TestClose(t *testing.T) {
 		t.Fatalf("open connections after Close() (-got, +want):\n%s", diff)
 	}
 }
+
+// TestFlushHonorsContextDeadline checks a flush stops when its context expires
+// instead of waiting a full grace period per retry: the shutdown flush has a
+// bounded budget, and re-arming the grace period on every attempt would exceed
+// the pod termination grace period.
+func TestFlushHonorsContextDeadline(t *testing.T) {
+	w, c := newFlushWorker(t, func(ctx context.Context, _ *serverConn, _ ch.Query) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	c.config.GracePeriod = 2 * time.Second
+
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	w.Flush(ctx)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("Flush() took %s, want it to stop with its context (50ms), not wait the %s grace period",
+			elapsed, c.config.GracePeriod)
+	}
+}

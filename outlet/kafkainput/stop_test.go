@@ -4,9 +4,12 @@
 package kafkainput
 
 import (
+	"context"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"akvorado/common/helpers"
 )
 
 // TestStopWorkersInParallel checks every worker is stopped concurrently. Each
@@ -47,5 +50,25 @@ func TestStopWorkersInParallel(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("StopWorkers() did not return")
+	}
+}
+
+// TestStopWorkerFlushesBeforeCommit checks the last batch is flushed before the
+// marked offsets are committed: committing first would persist the position of
+// flows still buffered in memory, and they would be lost if the flush failed.
+func TestStopWorkerFlushesBeforeCommit(t *testing.T) {
+	var order []string
+	err := stopWorker(
+		func() { order = append(order, "flush") },
+		func(context.Context) error {
+			order = append(order, "commit")
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("stopWorker() error:\n%+v", err)
+	}
+	if diff := helpers.Diff(order, []string{"flush", "commit"}); diff != "" {
+		t.Errorf("shutdown order (-got, +want):\n%s", diff)
 	}
 }
