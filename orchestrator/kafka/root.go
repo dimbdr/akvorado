@@ -6,11 +6,13 @@ package kafka
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
 
@@ -157,9 +159,22 @@ func (c *Component) reconcileTopic(ctx context.Context, admin *kadm.Client, topi
 		Logger()
 	td, ok := topics[topic]
 	if !ok {
-		if _, err := admin.CreateTopics(ctx, tc.NumPartitions, tc.ReplicationFactor, tc.ConfigEntries, topic); err != nil {
+		resp, err := admin.CreateTopics(ctx, tc.NumPartitions, tc.ReplicationFactor, tc.ConfigEntries, topic)
+		if err != nil {
 			l.Debug().Err(err).Msg("unable to create topic")
 			return fmt.Errorf("unable to create topic %q: %w", topic, err)
+		}
+		// kadm reports per-topic failures in the response, not as an error: a
+		// broker-side policy (for instance a mandatory min.insync.replicas)
+		// would otherwise be logged as a successful creation.
+		if r, ok := resp[topic]; ok && r.Err != nil {
+			if errors.Is(r.Err, kerr.TopicAlreadyExists) {
+				// Another orchestrator won the race; nothing left to do.
+				l.Info().Msg("topic already created by another instance")
+				return nil
+			}
+			l.Debug().Err(r.Err).Str("detail", r.ErrMessage).Msg("unable to create topic")
+			return fmt.Errorf("unable to create topic %q: %w (%s)", topic, r.Err, r.ErrMessage)
 		}
 		l.Info().Msg("topic created")
 		return nil
@@ -170,9 +185,14 @@ func (c *Component) reconcileTopic(ctx context.Context, admin *kadm.Client, topi
 			nbPartitions, tc.NumPartitions)
 	} else if nbPartitions < int(tc.NumPartitions) {
 		add := int(tc.NumPartitions) - nbPartitions
-		if _, err := admin.CreatePartitions(ctx, add, topic); err != nil {
+		resp, err := admin.CreatePartitions(ctx, add, topic)
+		if err != nil {
 			l.Debug().Err(err).Msg("unable to add more partitions")
 			return fmt.Errorf("unable to add more partitions to topic %q: %w", topic, err)
+		}
+		if r, ok := resp[topic]; ok && r.Err != nil {
+			l.Debug().Err(r.Err).Str("detail", r.ErrMessage).Msg("unable to add more partitions")
+			return fmt.Errorf("unable to add more partitions to topic %q: %w (%s)", topic, r.Err, r.ErrMessage)
 		}
 		l.Info().Msg("number of partitions increased")
 	}
@@ -182,9 +202,18 @@ func (c *Component) reconcileTopic(ctx context.Context, admin *kadm.Client, topi
 			td.Partitions.NumReplicas(), tc.ReplicationFactor)
 	}
 	configs, err := admin.DescribeTopicConfigs(ctx, topic)
-	if err != nil || len(configs) != 1 {
+	if err != nil {
 		l.Debug().Err(err).Msg("unable to get topic configuration")
 		return fmt.Errorf("unable to get topic %q configuration: %w", topic, err)
+	}
+	if len(configs) != 1 {
+		l.Debug().Msgf("unable to get topic configuration: got %d resources, want 1", len(configs))
+		return fmt.Errorf("unable to get topic %q configuration: got %d resources, want 1", topic, len(configs))
+	}
+	if configs[0].Err != nil {
+		l.Debug().Err(configs[0].Err).Str("detail", configs[0].ErrMessage).Msg("unable to get topic configuration")
+		return fmt.Errorf("unable to get topic %q configuration: %w (%s)",
+			topic, configs[0].Err, configs[0].ErrMessage)
 	}
 	got := map[string]*string{}
 	for _, config := range configs[0].Configs {
@@ -210,9 +239,17 @@ func (c *Component) reconcileTopic(ctx context.Context, admin *kadm.Client, topi
 				})
 			}
 		}
-		if _, err := admin.AlterTopicConfigs(ctx, alterConfigs, topic); err != nil {
+		resp, err := admin.AlterTopicConfigs(ctx, alterConfigs, topic)
+		if err != nil {
 			l.Debug().Err(err).Msg("unable to set topic configuration")
 			return fmt.Errorf("unable to set topic configuration for %q: %w", topic, err)
+		}
+		for _, r := range resp {
+			if r.Err != nil {
+				l.Debug().Err(r.Err).Str("detail", r.ErrMessage).Msg("unable to set topic configuration")
+				return fmt.Errorf("unable to set topic configuration for %q: %w (%s)",
+					topic, r.Err, r.ErrMessage)
+			}
 		}
 		l.Info().Msg("topic updated")
 	}

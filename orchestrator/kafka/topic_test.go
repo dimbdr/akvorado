@@ -4,12 +4,16 @@
 package kafka
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"testing"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kfake"
+	"github.com/twmb/franz-go/pkg/kmsg"
 
 	"akvorado/common/helpers"
 	"akvorado/common/kafka"
@@ -189,6 +193,51 @@ func TestManageTemplateTopic(t *testing.T) {
 	}
 	if got := configOf("message.timestamp.type"); got != "CreateTime" {
 		t.Fatalf("message.timestamp.type = %q, want \"CreateTime\"", got)
+	}
+}
+
+// TestManageTopicCreatePolicyViolation checks a broker-side creation policy
+// reported per topic (not as a request error) is not mistaken for a success.
+// The QaaS cluster enforces min.insync.replicas=1 this way.
+func TestManageTopicCreatePolicyViolation(t *testing.T) {
+	cluster := newFakeKafka(t)
+	detail := "topic config should be: 'min.insync.replicas=1'"
+	cluster.ControlKey(int16(kmsg.CreateTopics), func(req kmsg.Request) (kmsg.Response, error, bool) {
+		r := req.(*kmsg.CreateTopicsRequest)
+		resp := r.ResponseKind().(*kmsg.CreateTopicsResponse)
+		for _, topic := range r.Topics {
+			resp.Topics = append(resp.Topics, kmsg.CreateTopicsResponseTopic{
+				Topic:        topic.Topic,
+				ErrorCode:    kerr.PolicyViolation.Code,
+				ErrorMessage: &detail,
+			})
+		}
+		return resp, nil, true
+	})
+	input := DefaultInputConfiguration()
+	input.ManageTopic = false
+	templates := DefaultTemplateConfiguration()
+	templates.ManageTopic = true
+	templates.Brokers = cluster.ListenAddrs()
+	templates.Topic = "templates-test"
+	c, err := New(reporter.NewMock(t), input, nil, templates, Dependencies{Schema: schema.NewMock(t)})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	opts, err := kafka.NewConfig(reporter.NewMock(t), kafka.Configuration{Brokers: cluster.ListenAddrs()})
+	if err != nil {
+		t.Fatalf("NewConfig() error: %v", err)
+	}
+	topic := fmt.Sprintf("templates-test-%d", rand.Int())
+	err = c.manage(context.Background(), opts, cluster.ListenAddrs(), topic, TopicConfiguration{
+		NumPartitions:     1,
+		ReplicationFactor: 1,
+	})
+	if !errors.Is(err, kerr.PolicyViolation) {
+		t.Fatalf("manage() error = %v, want %v", err, kerr.PolicyViolation)
+	}
+	if cluster.TopicInfo(topic) != nil {
+		t.Fatalf("topic %q was created despite the policy violation", topic)
 	}
 }
 
