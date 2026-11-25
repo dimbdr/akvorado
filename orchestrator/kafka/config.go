@@ -29,6 +29,24 @@ type OutputConfiguration struct {
 	TopicConfiguration `mapstructure:",squash" yaml:",inline"`
 }
 
+// TemplateConfiguration describes the compacted Kafka topic shared by the
+// outlets to exchange NetFlow/IPFIX templates and sampling rates.
+type TemplateConfiguration struct {
+	kafka.Configuration `mapstructure:",squash" yaml:",inline"`
+	// Enabled tells if the shared template cache is enabled for the outlets.
+	Enabled bool
+	// ManageTopic tells if the template Kafka topic should be managed
+	// (create/update).
+	ManageTopic bool
+	// TopicConfiguration describes the template topic configuration.
+	TopicConfiguration TopicConfiguration
+}
+
+// strptr returns a pointer to the provided string, for topic config entries.
+func strptr(s string) *string {
+	return &s
+}
+
 // TopicConfiguration describes the configuration for a topic
 type TopicConfiguration struct {
 	// NumPartitions tells how many partitions should be used for the topic.
@@ -49,6 +67,37 @@ func DefaultInputConfiguration() InputConfiguration {
 		TopicConfiguration: TopicConfiguration{
 			NumPartitions:           1,
 			ReplicationFactor:       1,
+			ConfigEntriesStrictSync: true,
+		},
+	}
+}
+
+// DefaultTemplateConfiguration represents the default configuration for the
+// shared template topic.
+//
+// The topic is compacted: `cleanup.policy=compact,delete` with `retention.ms=-1`
+// disables time-based deletion, so only tombstones are expired (`delete`) and
+// compaction still deduplicates. A rarely re-sent options template is therefore
+// never deleted; losing one costs a startup burst of undecodable flows.
+func DefaultTemplateConfiguration() TemplateConfiguration {
+	return TemplateConfiguration{
+		Configuration: kafka.Configuration{
+			Topic:   "templates",
+			Brokers: []string{"127.0.0.1:9092"},
+		},
+		Enabled:     false,
+		ManageTopic: false,
+		TopicConfiguration: TopicConfiguration{
+			NumPartitions:     1,
+			ReplicationFactor: 1,
+			ConfigEntries: map[string]*string{
+				"cleanup.policy":            strptr("compact,delete"),
+				"message.timestamp.type":    strptr("CreateTime"),
+				"segment.ms":                strptr("600000"),
+				"min.cleanable.dirty.ratio": strptr("0.1"),
+				"delete.retention.ms":       strptr("86400000"),
+				"retention.ms":              strptr("-1"),
+			},
 			ConfigEntriesStrictSync: true,
 		},
 	}

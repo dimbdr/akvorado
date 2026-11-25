@@ -179,3 +179,39 @@ func TestOrchestratorWatch(t *testing.T) {
 		t.Fatal("orchestratorWatch() did not register a change")
 	}
 }
+
+// TestOrchestratorConfigTemplateCacheAbsent checks a disabled template cache is
+// omitted from the outlet configuration: an old outlet must never see the
+// "flow.template-cache" key. The generic harness can only assert a key exists,
+// hence this dedicated walk.
+func TestOrchestratorConfigTemplateCacheAbsent(t *testing.T) {
+	root := RootCmd
+	buf := new(bytes.Buffer)
+	root.SetOut(buf)
+	root.SetArgs([]string{
+		"orchestrator", "--dump", "--check",
+		filepath.Join("testdata", "configurations", "template-cache-disabled", "in.yaml"),
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("`orchestrator` command error:\n%+v", err)
+	}
+	var gotYAML map[string]any
+	if err := yaml.Unmarshal(buf.Bytes(), &gotYAML); err != nil {
+		t.Fatalf("yaml.Unmarshal(output) error:\n%+v", err)
+	}
+	outlet, ok := gotYAML["outlet"].([]any)
+	if !ok || len(outlet) == 0 {
+		t.Fatalf("outlet is missing from the dumped configuration")
+	}
+	first, ok := outlet[0].(map[string]any)
+	if !ok {
+		t.Fatalf("outlet[0] is not a map")
+	}
+	flow, ok := first["flow"].(map[string]any)
+	if !ok {
+		t.Fatalf("outlet[0].flow is not a map")
+	}
+	if _, ok := flow["templatecache"]; ok {
+		t.Fatalf("outlet[0].flow.templatecache should be absent when the cache is disabled")
+	}
+}

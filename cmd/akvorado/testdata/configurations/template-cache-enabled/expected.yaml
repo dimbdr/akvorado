@@ -1,0 +1,8 @@
+---
+paths:
+  kafkatemplates.topic: akvorado.templates
+  kafkatemplates.enabled: true
+  outlet.0.flow.templatecache.brokers:
+    - kafka1:9092
+  outlet.0.flow.templatecache.topic: akvorado.templates
+  outlet.0.flow.templatecache.enabled: true

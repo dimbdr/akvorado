@@ -75,7 +75,7 @@ func TestTopicCreation(t *testing.T) {
 			}
 			configuration.Brokers = brokers
 			// No version configuration needed for franz-go
-			c, err := New(reporter.NewMock(t), configuration, nil, Dependencies{Schema: schema.NewMock(t)})
+			c, err := New(reporter.NewMock(t), configuration, nil, TemplateConfiguration{}, Dependencies{Schema: schema.NewMock(t)})
 			if err != nil {
 				t.Fatalf("New() error:\n%+v", err)
 			}
@@ -135,7 +135,7 @@ func TestTopicMorePartitions(t *testing.T) {
 
 	configuration.Brokers = brokers
 	// No version configuration needed for franz-go
-	c, err := New(reporter.NewMock(t), configuration, nil, Dependencies{Schema: schema.NewMock(t)})
+	c, err := New(reporter.NewMock(t), configuration, nil, TemplateConfiguration{}, Dependencies{Schema: schema.NewMock(t)})
 	if err != nil {
 		t.Fatalf("New() error:\n%+v", err)
 	}
@@ -168,7 +168,7 @@ func TestTopicMorePartitions(t *testing.T) {
 
 	// Increase number of partitions
 	configuration.TopicConfiguration.NumPartitions = 4
-	c, err = New(reporter.NewMock(t), configuration, nil, Dependencies{Schema: schema.NewMock(t)})
+	c, err = New(reporter.NewMock(t), configuration, nil, TemplateConfiguration{}, Dependencies{Schema: schema.NewMock(t)})
 	if err != nil {
 		t.Fatalf("New() error:\n%+v", err)
 	}
@@ -221,7 +221,7 @@ func TestKafkaOutputManagement(t *testing.T) {
 		ConfigEntriesStrictSync: true,
 	}
 
-	c, err := New(reporter.NewMock(t), configuration, output, Dependencies{Schema: sch})
+	c, err := New(reporter.NewMock(t), configuration, output, TemplateConfiguration{}, Dependencies{Schema: sch})
 	if err != nil {
 		t.Fatalf("New() error:\n%+v", err)
 	}

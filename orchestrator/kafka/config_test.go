@@ -24,7 +24,7 @@ func TestDefaultInputConfiguration(t *testing.T) {
 func TestManageTopicDisabled(t *testing.T) {
 	config := DefaultInputConfiguration()
 	config.ManageTopic = false
-	c, err := New(reporter.NewMock(t), config, nil, Dependencies{Schema: schema.NewMock(t)})
+	c, err := New(reporter.NewMock(t), config, nil, TemplateConfiguration{}, Dependencies{Schema: schema.NewMock(t)})
 	if err != nil {
 		t.Fatalf("New() error:\n%+v", err)
 	}
@@ -44,7 +44,7 @@ func TestKafkaOutputDecoupledFromManageTopic(t *testing.T) {
 		ReplicationFactor: 1,
 	}
 	sch := schema.NewMock(t)
-	c, err := New(reporter.NewMock(t), config, output, Dependencies{Schema: sch})
+	c, err := New(reporter.NewMock(t), config, output, TemplateConfiguration{}, Dependencies{Schema: sch})
 	if err != nil {
 		t.Fatalf("New() error:\n%+v", err)
 	}

@@ -1,0 +1,9 @@
+---
+# Without a "kafka-templates" block, the shared template cache is disabled: the
+# template topic inherits the main Kafka cluster, but the outlets do not get a
+# "flow.template-cache" block.
+
+kafka:
+  topic: flows
+  brokers:
+    - kafka1:9092

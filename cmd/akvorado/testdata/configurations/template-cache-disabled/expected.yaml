@@ -1,0 +1,6 @@
+---
+paths:
+  kafkatemplates.brokers:
+    - kafka1:9092
+  kafkatemplates.topic: templates
+  kafkatemplates.enabled: false

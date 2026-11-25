@@ -27,6 +27,7 @@ import (
 	"akvorado/orchestrator"
 	"akvorado/orchestrator/clickhouse"
 	"akvorado/orchestrator/kafka"
+	"akvorado/outlet/flow/templatecache"
 )
 
 // OrchestratorConfiguration represents the configuration file for the orchestrator command.
@@ -38,6 +39,7 @@ type OrchestratorConfiguration struct {
 	ClickHouseDB     clickhousedb.Configuration
 	Kafka            kafka.InputConfiguration
 	KafkaOutput      *kafka.OutputConfiguration
+	KafkaTemplates   kafka.TemplateConfiguration
 	Orchestrator     orchestrator.Configuration `mapstructure:",squash" yaml:",inline"`
 	Schema           schema.Configuration
 	// Other service configurations
@@ -62,6 +64,7 @@ func (c *OrchestratorConfiguration) Reset() {
 		ClickHouse:       clickhouse.DefaultConfiguration(),
 		ClickHouseDB:     clickhousedb.DefaultConfiguration(),
 		Kafka:            kafka.DefaultInputConfiguration(),
+		KafkaTemplates:   kafka.DefaultTemplateConfiguration(),
 		Orchestrator:     orchestrator.DefaultConfiguration(),
 		Schema:           schema.DefaultConfiguration(),
 		// Other service configurations
@@ -118,6 +121,46 @@ components and centralizes configuration of the various other components.`,
 					}
 				}
 				config.Outlet[idx].Schema = config.Schema
+			}
+			// The template topic inherits the main Kafka cluster unless the
+			// operator set a broker list of its own.
+			if !slices.Contains(metadata.Keys, "KafkaTemplates.Brokers[0]") {
+				topic := config.KafkaTemplates.Topic
+				config.KafkaTemplates.Configuration = config.Kafka.Configuration
+				if topic == "" {
+					topic = "templates"
+				}
+				config.KafkaTemplates.Configuration.Topic = topic
+			}
+			if config.KafkaTemplates.Enabled {
+				for idx := range config.Outlet {
+					tc := config.Outlet[idx].Flow.TemplateCache
+					if tc == nil {
+						defaults := templatecache.DefaultConfiguration()
+						tc = &defaults
+						config.Outlet[idx].Flow.TemplateCache = tc
+					}
+					if !slices.Contains(metadata.Keys, fmt.Sprintf("Outlet[%d].Flow.TemplateCache.Brokers[0]", idx)) {
+						// Inherit the cluster. Keep a topic only if the
+						// operator set one; `defaults.Topic` is not a signal.
+						topicSet := slices.Contains(metadata.Keys, fmt.Sprintf("Outlet[%d].Flow.TemplateCache.Topic", idx))
+						topic := tc.Topic
+						tc.Configuration = config.KafkaTemplates.Configuration
+						if topicSet {
+							tc.Topic = topic
+						}
+					}
+					if tc.Topic == "" {
+						tc.Topic = config.KafkaTemplates.Topic
+					}
+					tc.Enabled = true
+				}
+			} else {
+				for idx := range config.Outlet {
+					// Drop an operator-written block: it would be emitted with
+					// enabled: false and an old outlet would reject the key.
+					config.Outlet[idx].Flow.TemplateCache = nil
+				}
 			}
 			for idx := range config.Console {
 				if !slices.Contains(metadata.Keys, fmt.Sprintf("Console[%d].ClickHouse.Servers[0]", idx)) {
@@ -191,7 +234,7 @@ func orchestratorStart(r *reporter.Reporter, config OrchestratorConfiguration, d
 	if err != nil {
 		return fmt.Errorf("unable to initialize schema component: %w", err)
 	}
-	kafkaComponent, err := kafka.New(r, config.Kafka, config.KafkaOutput, kafka.Dependencies{Schema: schemaComponent})
+	kafkaComponent, err := kafka.New(r, config.Kafka, config.KafkaOutput, config.KafkaTemplates, kafka.Dependencies{Schema: schemaComponent})
 	if err != nil {
 		return fmt.Errorf("unable to initialize kafka component: %w", err)
 	}

@@ -1,0 +1,12 @@
+---
+# When the template topic is enabled, the orchestrator manages it and injects a
+# "flow.template-cache" block into every outlet, inheriting the Kafka cluster.
+
+kafka:
+  topic: flows
+  brokers:
+    - kafka1:9092
+
+kafka-templates:
+  enabled: true
+  topic: akvorado.templates

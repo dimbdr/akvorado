@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"testing"
+	"time"
 
 	"github.com/twmb/franz-go/pkg/kfake"
 
@@ -63,7 +64,7 @@ func TestManageInputTopicFake(t *testing.T) {
 			ConfigEntries:           entries,
 			ConfigEntriesStrictSync: true,
 		}
-		c, err := New(reporter.NewMock(t), configuration, nil, Dependencies{Schema: schema.NewMock(t)})
+		c, err := New(reporter.NewMock(t), configuration, nil, TemplateConfiguration{}, Dependencies{Schema: schema.NewMock(t)})
 		if err != nil {
 			t.Fatalf("New() error:\n%+v", err)
 		}
@@ -128,7 +129,7 @@ func TestManageOutputTopicFake(t *testing.T) {
 		ReplicationFactor: 1,
 		ConfigEntries:     map[string]*string{"retention.ms": &retentionMs},
 	}
-	c, err := New(reporter.NewMock(t), configuration, output, Dependencies{Schema: sch})
+	c, err := New(reporter.NewMock(t), configuration, output, TemplateConfiguration{}, Dependencies{Schema: sch})
 	if err != nil {
 		t.Fatalf("New() error:\n%+v", err)
 	}
@@ -143,5 +144,74 @@ func TestManageOutputTopicFake(t *testing.T) {
 	unexpectedInput := fmt.Sprintf("%s-v%d", inputBase, pb.Version)
 	if cluster.TopicInfo(unexpectedInput) != nil {
 		t.Fatalf("input topic %q was created despite ManageTopic=false", unexpectedInput)
+	}
+}
+
+// TestManageTemplateTopic checks the shared template topic is created with the
+// compacted configuration the outlet cache relies on.
+func TestManageTemplateTopic(t *testing.T) {
+	cluster := newFakeKafka(t)
+	config := DefaultTemplateConfiguration()
+	config.Enabled = true
+	config.ManageTopic = true
+	config.Brokers = cluster.ListenAddrs()
+	config.Topic = fmt.Sprintf("templates-test-%d", rand.Int())
+	config.TopicConfiguration.NumPartitions = 1
+	config.TopicConfiguration.ReplicationFactor = 1
+	input := DefaultInputConfiguration()
+	input.ManageTopic = false // keep this test focused on the template topic
+	c, err := New(reporter.NewMock(t), input, nil, config, Dependencies{Schema: schema.NewMock(t)})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	topic := fmt.Sprintf("%s-v%d", config.Topic, pb.Version)
+	if got := topicPartitions(t, cluster, topic); got != 1 {
+		t.Fatalf("partitions = %d, want 1", got)
+	}
+	configOf := func(key string) string {
+		info := cluster.TopicInfo(topic)
+		if info == nil {
+			t.Fatalf("topic %q was not created", topic)
+		}
+		if v := info.Configs[key]; v != nil {
+			return *v
+		}
+		return ""
+	}
+	if got := configOf("cleanup.policy"); got != "compact,delete" {
+		t.Fatalf("cleanup.policy = %q, want \"compact,delete\"", got)
+	}
+	if got := configOf("retention.ms"); got != "-1" {
+		t.Fatalf("retention.ms = %q, want \"-1\"", got)
+	}
+	if got := configOf("message.timestamp.type"); got != "CreateTime" {
+		t.Fatalf("message.timestamp.type = %q, want \"CreateTime\"", got)
+	}
+}
+
+// TestTemplateTopicFailureIsWarning checks an unreachable template broker does
+// not stop the orchestrator and is bounded by the 5s timeout.
+func TestTemplateTopicFailureIsWarning(t *testing.T) {
+	config := DefaultTemplateConfiguration()
+	config.Enabled = true
+	config.ManageTopic = true
+	config.Brokers = []string{"127.0.0.1:1"} // unreachable
+	config.Topic = "templates-test"
+	config.TopicConfiguration.NumPartitions = 1
+	input := DefaultInputConfiguration()
+	input.ManageTopic = false
+	c, err := New(reporter.NewMock(t), input, nil, config, Dependencies{Schema: schema.NewMock(t)})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	start := time.Now()
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start() returned a fatal error for the template topic: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("Start() took %s for an unreachable template broker, want < 10s", elapsed)
 	}
 }
