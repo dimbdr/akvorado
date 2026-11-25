@@ -15,9 +15,11 @@ import (
 	"sync"
 	"time"
 
+	"akvorado/common/pb"
 	"akvorado/common/reporter"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"gopkg.in/tomb.v2"
 )
 
 // source describes where a cache write comes from.
@@ -47,7 +49,11 @@ type Cache struct {
 	entries   map[Key]Entry
 	lastWrite map[Key]time.Time
 	origin    string
+	topic     string
 	producer  producer
+	consumer  *kgo.Client
+	started   bool
+	t         tomb.Tomb
 
 	metrics struct {
 		entries        reporter.Gauge
@@ -73,6 +79,7 @@ func New(r *reporter.Reporter, config Configuration) (*Cache, error) {
 		entries:   make(map[Key]Entry),
 		lastWrite: make(map[Key]time.Time),
 		origin:    fmt.Sprintf("%s-%d", hostname, time.Now().UnixNano()),
+		topic:     fmt.Sprintf("%s-v%d", config.Topic, pb.Version),
 	}
 
 	c.metrics.entries = c.r.Gauge(reporter.GaugeOpts{
@@ -319,10 +326,10 @@ func (c *Cache) publish(key Key, entry Entry) {
 		return
 	}
 	record := &kgo.Record{
-		Topic:     c.config.Topic,
+		Topic:     c.topic,
 		Key:       []byte(key.String()),
 		Value:     value,
-		Timestamp: time.Now(),
+		Timestamp: entry.UpdatedAt,
 	}
 	c.produce(record)
 }
@@ -333,7 +340,7 @@ func (c *Cache) publishTombstone(key Key) {
 		return
 	}
 	record := &kgo.Record{
-		Topic:     c.config.Topic,
+		Topic:     c.topic,
 		Key:       []byte(key.String()),
 		Value:     nil,
 		Timestamp: time.Now(),
