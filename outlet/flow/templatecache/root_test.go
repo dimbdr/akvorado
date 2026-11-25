@@ -5,6 +5,7 @@ package templatecache
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -73,8 +74,8 @@ func TestUpdatedAtWins(t *testing.T) {
 	key := Key{Version: 9, Exporter: "192.0.2.10", ObsDomainID: 300, TemplateID: 256}
 	newer := Entry{Kind: "data", Hash: "b", UpdatedAt: time.Now(), Template: netflow.TemplateRecord{TemplateId: 256, FieldCount: 2}}
 	older := Entry{Kind: "data", Hash: "a", UpdatedAt: time.Now().Add(-time.Hour), Template: netflow.TemplateRecord{TemplateId: 256, FieldCount: 1}}
-	c.set(key, newer, sourceRestore)
-	c.set(key, older, sourceRestore)
+	c.set(key, newer, sourceRestore, 0)
+	c.set(key, older, sourceRestore, 0)
 	got, ok := c.GetTemplate(key)
 	if !ok {
 		t.Fatal("GetTemplate() not found")
@@ -216,7 +217,7 @@ func TestOwnEchoIgnored(t *testing.T) {
 		Kind: "data", Hash: "echo", Origin: c.origin, UpdatedAt: time.Now().Add(time.Hour),
 		Template: netflow.TemplateRecord{TemplateId: 256, FieldCount: 9},
 	}
-	c.set(key, echo, sourceKafka)
+	c.set(key, echo, sourceKafka, 1)
 	got, ok := c.GetTemplate(key)
 	if !ok {
 		t.Fatal("GetTemplate() not found after own echo")
@@ -236,7 +237,7 @@ func TestLocalWinsOverPeerClock(t *testing.T) {
 		Kind: "data", Hash: "peer", Origin: "peer", UpdatedAt: time.Now().Add(-time.Hour),
 		Template: netflow.TemplateRecord{TemplateId: 256, FieldCount: 9},
 	}
-	c.set(key, peer, sourceKafka)
+	c.set(key, peer, sourceKafka, 1)
 	got, ok := c.GetTemplate(key)
 	if !ok {
 		t.Fatal("GetTemplate() not found after an older peer record")
@@ -276,11 +277,14 @@ func (p *fakeProducer) TryProduce(_ context.Context, r *kgo.Record, promise func
 		}
 		return
 	}
+	r.Offset = int64(len(p.records)) + 1
 	p.records = append(p.records, r)
 	if promise != nil {
 		promise(r, nil)
 	}
 }
+
+func (p *fakeProducer) Flush(context.Context) error { return nil }
 
 func (p *fakeProducer) Close() {}
 
@@ -313,5 +317,60 @@ func TestSeveralObservationDomains(t *testing.T) {
 	}
 	if _, ok := c.GetTemplate(second); !ok {
 		t.Fatal("second observation domain template was withdrawn too")
+	}
+}
+
+func TestPeerTombstoneOlderThanLocalWriteIgnored(t *testing.T) {
+	c := newCache(t, DefaultConfiguration())
+	p := &fakeProducer{accept: true}
+	c.producer = p
+	key := Key{Version: 9, Exporter: "192.0.2.10", ObsDomainID: 300, TemplateID: 256}
+	if _, err := c.SetTemplate(key, testTemplate()); err != nil {
+		t.Fatalf("SetTemplate() error: %v", err)
+	}
+	if c.publishedOffset[key] == 0 {
+		t.Fatal("the local publish offset was not recorded")
+	}
+
+	// A peer tombstone produced before our write can be ordered after it. It
+	// must not delete the newer local entry, or the pod stops decoding that
+	// exporter until the device re-sends the template.
+	c.deleteFromKafka(key, time.Now().Add(time.Hour), c.publishedOffset[key])
+	if _, ok := c.GetTemplate(key); !ok {
+		t.Fatal("an older peer tombstone deleted a newer local entry")
+	}
+
+	// While our publish is still in flight the offset is unknown: an older
+	// tombstone must still not delete a newer local entry.
+	delete(c.publishedOffset, key)
+	c.deleteFromKafka(key, time.Now().Add(-time.Hour), 99)
+	if _, ok := c.GetTemplate(key); !ok {
+		t.Fatal("an older peer tombstone deleted a newer local entry (unknown offset)")
+	}
+
+	// A tombstone ordered after our write still wins.
+	c.deleteFromKafka(key, time.Now().Add(time.Hour), 100)
+	if _, ok := c.GetTemplate(key); ok {
+		t.Fatal("a newer peer tombstone did not delete the entry")
+	}
+}
+
+func TestMalformedTemplateRecordRejected(t *testing.T) {
+	for _, value := range []string{
+		`{"kind":"data"}`,
+		`{"kind":"ipfix-options","hash":"a"}`,
+	} {
+		var entry Entry
+		if err := json.Unmarshal([]byte(value), &entry); err == nil {
+			t.Fatalf("Unmarshal(%s) succeeded, want an error", value)
+		}
+	}
+	// A sampler record legitimately has no template.
+	var entry Entry
+	if err := json.Unmarshal([]byte(`{"kind":"sampler","sampling_rate":100}`), &entry); err != nil {
+		t.Fatalf("Unmarshal(sampler) error: %v", err)
+	}
+	if entry.Template != nil || entry.SamplingRate != 100 {
+		t.Fatalf("sampler entry = %+v, want no template and rate 100", entry)
 	}
 }

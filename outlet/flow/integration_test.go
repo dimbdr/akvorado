@@ -20,6 +20,7 @@ import (
 	"akvorado/outlet/flow/decoder"
 	"akvorado/outlet/flow/templatecache"
 
+	"github.com/netsampler/goflow2/v3/decoders/netflow"
 	"github.com/twmb/franz-go/pkg/kfake"
 )
 
@@ -212,5 +213,71 @@ func TestSharedTemplateCacheKafkaDownDoesNotBlock(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Decode() blocked on an unreachable broker")
+	}
+}
+
+// TestRestoreDoesNotResurrectTombstone checks the state file is merged before
+// the topic preload: a template withdrawn by another pod while this one was
+// down must not come back from the local file.
+func TestRestoreDoesNotResurrectTombstone(t *testing.T) {
+	baseTopic := fmt.Sprintf("templates-test-%d", rand.Int())
+	topic := fmt.Sprintf("%s-v%d", baseTopic, pb.Version)
+	cluster, err := kfake.NewCluster(kfake.NumBrokers(1), kfake.SeedTopics(1, topic))
+	if err != nil {
+		t.Fatalf("NewCluster() error: %v", err)
+	}
+	defer cluster.Close()
+	stateFile := filepath.Join(t.TempDir(), "flow.state")
+	key := templatecache.Key{Version: 10, Exporter: "192.0.2.10", ObsDomainID: 16843264, TemplateID: 384}
+
+	// A first outlet stores the template and saves its state.
+	seeded, err := New(reporter.NewMock(t), Configuration{StatePersistFile: stateFile}, Dependencies{Schema: schema.NewMock(t)})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	if err := seeded.Start(); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	if _, err := seeded.cache.SetTemplate(key, netflow.TemplateRecord{TemplateId: 384, FieldCount: 1}); err != nil {
+		t.Fatalf("SetTemplate() error: %v", err)
+	}
+	if err := seeded.Stop(); err != nil {
+		t.Fatalf("Stop() error: %v", err)
+	}
+
+	// Another pod receives the template and then its withdrawal.
+	tc := templatecache.DefaultConfiguration()
+	tc.Enabled = true
+	tc.Brokers = cluster.ListenAddrs()
+	tc.Topic = baseTopic
+	withdrawer, err := templatecache.New(reporter.NewMock(t), tc)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	if err := withdrawer.Start(); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	if _, err := withdrawer.SetTemplate(key, netflow.TemplateRecord{TemplateId: 384, FieldCount: 1}); err != nil {
+		t.Fatalf("SetTemplate() error: %v", err)
+	}
+	if err := withdrawer.DeleteTemplate(key); err != nil {
+		t.Fatalf("DeleteTemplate() error: %v", err)
+	}
+	if err := withdrawer.Stop(); err != nil {
+		t.Fatalf("Stop() error: %v", err)
+	}
+
+	// The restarted outlet restores the state file, then preloads the topic:
+	// the tombstone must win.
+	restarted, err := New(reporter.NewMock(t), Configuration{TemplateCache: &tc, StatePersistFile: stateFile}, Dependencies{Schema: schema.NewMock(t)})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	if err := restarted.Start(); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	defer restarted.Stop()
+	if _, ok := restarted.cache.GetTemplate(key); ok {
+		t.Fatal("the state file resurrected a template withdrawn through the topic")
 	}
 }

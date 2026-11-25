@@ -1,0 +1,17 @@
+---
+# An operator-written per-outlet block must be dropped when the shared cache is
+# disabled: it would be emitted with "enabled: false" and an old outlet would
+# reject the unknown key.
+
+kafka:
+  topic: flows
+  brokers:
+    - kafka1:9092
+
+outlet:
+  - flow:
+      template-cache:
+        enabled: true
+        topic: custom-templates
+        brokers:
+          - other:9092

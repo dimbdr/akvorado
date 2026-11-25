@@ -82,16 +82,19 @@ func New(r *reporter.Reporter, config Configuration, dependencies Dependencies) 
 
 // Start starts the flow component.
 func (c *Component) Start() error {
-	// The preload must finish before the flow workers start decoding.
-	if err := c.cache.Start(); err != nil {
-		c.r.Warn().Err(err).Msg("cannot start template cache, continuing without it")
-	}
+	// Restore the state file before the preload: the topic is authoritative for
+	// deletions, so restoring afterwards would resurrect a template withdrawn by
+	// another pod while this one was down.
 	if c.config.StatePersistFile != "" {
 		if err := c.RestoreState(c.config.StatePersistFile); err != nil {
 			c.r.Warn().Err(err).Msg("cannot load decoders' state, ignoring")
 		} else {
 			c.r.Info().Msg("previous decoders' state loaded")
 		}
+	}
+	// The preload must finish before the flow workers start decoding.
+	if err := c.cache.Start(); err != nil {
+		c.r.Warn().Err(err).Msg("cannot start template cache, continuing without it")
 	}
 	return nil
 }

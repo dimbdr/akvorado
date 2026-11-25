@@ -37,6 +37,7 @@ const (
 // producer is the subset of kgo.Client used by the cache.
 type producer interface {
 	TryProduce(context.Context, *kgo.Record, func(*kgo.Record, error))
+	Flush(context.Context) error
 	Close()
 }
 
@@ -48,12 +49,17 @@ type Cache struct {
 	mu        sync.RWMutex
 	entries   map[Key]Entry
 	lastWrite map[Key]time.Time
-	origin    string
-	topic     string
-	producer  producer
-	consumer  *kgo.Client
-	started   bool
-	t         tomb.Tomb
+	// publishedOffset remembers the offset of the last record this pod
+	// successfully published for a key. Records at or below it are our own and
+	// must not be re-applied, even when a peer tombstone is ordered after our
+	// newer local write.
+	publishedOffset map[Key]int64
+	origin          string
+	topic           string
+	producer        producer
+	consumer        *kgo.Client
+	started         bool
+	t               tomb.Tomb
 
 	metrics struct {
 		entries        reporter.Gauge
@@ -74,12 +80,13 @@ func New(r *reporter.Reporter, config Configuration) (*Cache, error) {
 		hostname = "unknown"
 	}
 	c := &Cache{
-		r:         r,
-		config:    config,
-		entries:   make(map[Key]Entry),
-		lastWrite: make(map[Key]time.Time),
-		origin:    fmt.Sprintf("%s-%d", hostname, time.Now().UnixNano()),
-		topic:     fmt.Sprintf("%s-v%d", config.Topic, pb.Version),
+		r:               r,
+		config:          config,
+		entries:         make(map[Key]Entry),
+		lastWrite:       make(map[Key]time.Time),
+		publishedOffset: make(map[Key]int64),
+		origin:          fmt.Sprintf("%s-%d", hostname, time.Now().UnixNano()),
+		topic:           fmt.Sprintf("%s-v%d", config.Topic, pb.Version),
 	}
 
 	c.metrics.entries = c.r.Gauge(reporter.GaugeOpts{
@@ -139,7 +146,7 @@ func (c *Cache) SetTemplate(key Key, template any) (bool, error) {
 		UpdatedAt: time.Now(),
 		Template:  template,
 	}
-	return c.set(key, entry, sourceLocal), nil
+	return c.set(key, entry, sourceLocal, 0), nil
 }
 
 // DeleteTemplate removes a template.
@@ -149,9 +156,11 @@ func (c *Cache) DeleteTemplate(key Key) error {
 }
 
 // DeleteTemplates removes the data or options templates of an exporter, as
-// requested by an IPFIX withdraw-all. Sampling rates are never removed.
+// requested by an IPFIX withdraw-all. Sampling rates are never removed. The
+// selection and the deletion share one critical section so a peer re-add that
+// lands concurrently is not deleted by the withdraw-all.
 func (c *Cache) DeleteTemplates(exporter string, version uint16, obsDomainID uint32, options bool) error {
-	c.mu.RLock()
+	c.mu.Lock()
 	keys := make([]Key, 0)
 	for key, entry := range c.entries {
 		if key.Exporter != exporter || key.Version != version ||
@@ -164,9 +173,16 @@ func (c *Cache) DeleteTemplates(exporter string, version uint16, obsDomainID uin
 		}
 		keys = append(keys, key)
 	}
-	c.mu.RUnlock()
 	for _, key := range keys {
-		c.delete(key, sourceLocal)
+		delete(c.entries, key)
+		delete(c.lastWrite, key)
+	}
+	if len(keys) > 0 {
+		c.metrics.entries.Set(float64(len(c.entries)))
+	}
+	c.mu.Unlock()
+	for _, key := range keys {
+		c.publishTombstone(key)
 	}
 	return nil
 }
@@ -190,7 +206,7 @@ func (c *Cache) SetSamplingRate(key Key, rate uint32) error {
 		UpdatedAt:    time.Now(),
 		SamplingRate: rate,
 	}
-	c.set(key, entry, sourceLocal)
+	c.set(key, entry, sourceLocal, 0)
 	return nil
 }
 
@@ -211,12 +227,13 @@ func (c *Cache) Snapshot() map[Key]Entry {
 // Restore merges entries from the local state file into the cache.
 func (c *Cache) Restore(entries map[Key]Entry) {
 	for key, entry := range entries {
-		c.set(key, entry, sourceRestore)
+		c.set(key, entry, sourceRestore, 0)
 	}
 }
 
-// set is the single write path for the cache.
-func (c *Cache) set(key Key, entry Entry, src source) bool {
+// set is the single write path for the cache. offset is the topic offset of the
+// record for sourceKafka, and zero otherwise.
+func (c *Cache) set(key Key, entry Entry, src source, offset int64) bool {
 	var publish bool
 
 	c.mu.Lock()
@@ -247,6 +264,12 @@ func (c *Cache) set(key Key, entry Entry, src source) bool {
 			c.mu.Unlock()
 			return false
 		}
+		// A record at or below our last successful publish is older than our
+		// local write: a peer tombstone ordered after it must not win.
+		if published, ok := c.publishedOffset[key]; ok && offset <= published {
+			c.mu.Unlock()
+			return false
+		}
 		if ok && existing.Origin == c.origin && entry.UpdatedAt.Before(existing.UpdatedAt) {
 			c.mu.Unlock()
 			return false
@@ -263,7 +286,9 @@ func (c *Cache) set(key Key, entry Entry, src source) bool {
 			return false
 		}
 		c.entries[key] = entry
-		c.lastWrite[key] = time.Now()
+		// Do not mark the entry as freshly published: the topic preload runs
+		// after the restore, and a re-send from the device must republish
+		// immediately if the topic lost the entry.
 		c.metrics.entries.Set(float64(len(c.entries)))
 		c.mu.Unlock()
 		return true
@@ -331,7 +356,7 @@ func (c *Cache) publish(key Key, entry Entry) {
 		Value:     value,
 		Timestamp: entry.UpdatedAt,
 	}
-	c.produce(record)
+	c.produce(key, record)
 }
 
 // publishTombstone sends a tombstone for the provided key.
@@ -346,19 +371,26 @@ func (c *Cache) publishTombstone(key Key) {
 		Timestamp: time.Now(),
 		Headers:   []kgo.RecordHeader{{Key: "origin", Value: []byte(c.origin)}},
 	}
-	c.produce(record)
+	c.produce(key, record)
 }
 
-// produce sends a record and counts the outcome.
-func (c *Cache) produce(record *kgo.Record) {
-	c.producer.TryProduce(context.Background(), record, func(_ *kgo.Record, err error) {
+// produce sends a record and counts the outcome. On success, it remembers the
+// record offset so our own echoes can be ignored without comparing clocks.
+func (c *Cache) produce(key Key, record *kgo.Record) {
+	c.producer.TryProduce(context.Background(), record, func(produced *kgo.Record, err error) {
 		switch {
 		case err == nil:
+			c.mu.Lock()
+			if produced.Offset > c.publishedOffset[key] {
+				c.publishedOffset[key] = produced.Offset
+			}
+			c.mu.Unlock()
 			c.metrics.published.Inc()
 		case errors.Is(err, kgo.ErrMaxBuffered):
 			c.metrics.publishDropped.Inc()
 		default:
 			c.metrics.publishErrors.Inc()
+			c.r.Debug().Err(err).Str("key", key.String()).Msg("cannot publish template cache record")
 		}
 	})
 }

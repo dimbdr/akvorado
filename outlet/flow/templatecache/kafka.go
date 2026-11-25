@@ -92,6 +92,13 @@ func (c *Cache) Stop() error {
 		c.consumer = nil
 	}
 	if c.producer != nil {
+		// kgo.Close does not flush buffered records: send what we have before
+		// closing, so a template received just before shutdown is not lost.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := c.producer.Flush(ctx); err != nil {
+			c.r.Warn().Err(err).Msg("cannot flush template cache producer")
+		}
+		cancel()
 		c.producer.Close()
 		c.producer = nil
 	}
@@ -152,16 +159,24 @@ func (c *Cache) preload(ctx context.Context) {
 		id    int32
 	}
 	next := make(map[partition]int64)
+	skip := make(map[partition]bool)
 	starts.Each(func(offset kadm.ListedOffset) {
+		if offset.Err != nil {
+			// A partition we cannot read must not keep the preload running
+			// until its deadline.
+			skip[partition{offset.Topic, offset.Partition}] = true
+			return
+		}
 		next[partition{offset.Topic, offset.Partition}] = offset.Offset
 	})
 	done := func() bool {
 		finished := true
 		ends.Each(func(offset kadm.ListedOffset) {
-			if offset.Err != nil {
+			p := partition{offset.Topic, offset.Partition}
+			if offset.Err != nil || skip[p] {
 				return
 			}
-			if next[partition{offset.Topic, offset.Partition}] < offset.Offset {
+			if next[p] < offset.Offset {
 				finished = false
 			}
 		})
@@ -174,7 +189,11 @@ func (c *Cache) preload(ctx context.Context) {
 	for !done() {
 		fetches := c.consumer.PollFetches(ctx)
 		if ctx.Err() != nil {
-			c.r.Warn().Err(ctx.Err()).Str("topic", c.topic).Msg("template cache preload timed out")
+			event := c.r.Debug()
+			if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				event = c.r.Warn()
+			}
+			event.Err(ctx.Err()).Str("topic", c.topic).Msg("template cache preload interrupted")
 			return
 		}
 		if errs := fetches.Errors(); len(errs) > 0 {
@@ -229,14 +248,7 @@ func (c *Cache) applyRecord(record *kgo.Record) {
 		return
 	}
 	if record.Value == nil {
-		var origin string
-		for _, header := range record.Headers {
-			if header.Key == "origin" {
-				origin = string(header.Value)
-				break
-			}
-		}
-		c.deleteFromKafka(key, origin, record.Timestamp)
+		c.deleteFromKafka(key, record.Timestamp, record.Offset)
 		return
 	}
 	var entry Entry
@@ -245,18 +257,27 @@ func (c *Cache) applyRecord(record *kgo.Record) {
 		c.r.Debug().Err(err).Msg("invalid template cache record")
 		return
 	}
-	c.set(key, entry, sourceKafka)
+	c.set(key, entry, sourceKafka, record.Offset)
 }
 
-// deleteFromKafka applies a tombstone read from the topic.
-func (c *Cache) deleteFromKafka(key Key, origin string, timestamp time.Time) {
+// deleteFromKafka applies a tombstone read from the topic. A tombstone at or
+// below our last successful publish is older than our local write: a peer
+// producer can order it after a newer local re-add, and it must not win.
+func (c *Cache) deleteFromKafka(key Key, timestamp time.Time, offset int64) {
 	c.mu.Lock()
 	stored, ok := c.entries[key]
 	if !ok {
 		c.mu.Unlock()
 		return
 	}
-	if origin == c.origin && stored.Origin == c.origin && !stored.UpdatedAt.Before(timestamp) {
+	if published, ok := c.publishedOffset[key]; ok && offset <= published {
+		c.mu.Unlock()
+		return
+	}
+	// Our local write is at least as new as the tombstone: a peer tombstone
+	// whose produce raced ours must not delete it. This is a stopgap while the
+	// publish offset is unknown; the offset check above is exact.
+	if stored.Origin == c.origin && !stored.UpdatedAt.Before(timestamp) {
 		c.mu.Unlock()
 		return
 	}

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"sync/atomic"
 
 	"github.com/fsnotify/fsnotify"
@@ -22,6 +23,7 @@ import (
 	"akvorado/common/daemon"
 	"akvorado/common/helpers"
 	"akvorado/common/httpserver"
+	commonkafka "akvorado/common/kafka"
 	"akvorado/common/reporter"
 	"akvorado/common/schema"
 	"akvorado/orchestrator"
@@ -126,7 +128,9 @@ components and centralizes configuration of the various other components.`,
 			// operator set a broker list of its own.
 			if !slices.Contains(metadata.Keys, "KafkaTemplates.Brokers[0]") {
 				topic := config.KafkaTemplates.Topic
-				config.KafkaTemplates.Configuration = config.Kafka.Configuration
+				config.KafkaTemplates.Configuration = inheritKafkaCluster(
+					config.Kafka.Configuration, config.KafkaTemplates.Configuration,
+					metadata.Keys, "KafkaTemplates.")
 				if topic == "" {
 					topic = "templates"
 				}
@@ -145,7 +149,9 @@ components and centralizes configuration of the various other components.`,
 						// operator set one; `defaults.Topic` is not a signal.
 						topicSet := slices.Contains(metadata.Keys, fmt.Sprintf("Outlet[%d].Flow.TemplateCache.Topic", idx))
 						topic := tc.Topic
-						tc.Configuration = config.KafkaTemplates.Configuration
+						tc.Configuration = inheritKafkaCluster(
+							config.KafkaTemplates.Configuration, tc.Configuration,
+							metadata.Keys, fmt.Sprintf("Outlet[%d].Flow.TemplateCache.", idx))
 						if topicSet {
 							tc.Topic = topic
 						}
@@ -159,6 +165,9 @@ components and centralizes configuration of the various other components.`,
 				for idx := range config.Outlet {
 					// Drop an operator-written block: it would be emitted with
 					// enabled: false and an old outlet would reject the key.
+					if config.Outlet[idx].Flow.TemplateCache != nil {
+						cmd.PrintErrf("warning: Outlet[%d].Flow.TemplateCache is ignored because KafkaTemplates.Enabled is false\n", idx)
+					}
 					config.Outlet[idx].Flow.TemplateCache = nil
 				}
 			}
@@ -673,4 +682,29 @@ func orchestratorNetworksMigrationHook() mapstructure.DecodeHookFunc {
 
 		return from.Interface(), nil
 	}
+}
+
+// inheritKafkaCluster returns the parent Kafka cluster configuration, keeping
+// any TLS or SASL settings the operator explicitly set on the child. Brokers
+// are inherited, but a child connection with its own credentials must not be
+// silently replaced by the parent's.
+func inheritKafkaCluster(parent, child commonkafka.Configuration, keys []string, prefix string) commonkafka.Configuration {
+	result := parent
+	if hasKeyPrefix(keys, prefix+"TLS.") {
+		result.TLS = child.TLS
+	}
+	if hasKeyPrefix(keys, prefix+"SASL.") {
+		result.SASL = child.SASL
+	}
+	return result
+}
+
+// hasKeyPrefix tells if one of the keys starts with the provided prefix.
+func hasKeyPrefix(keys []string, prefix string) bool {
+	for _, key := range keys {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
 }

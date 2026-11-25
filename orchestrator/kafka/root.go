@@ -121,7 +121,8 @@ func (c *Component) Start() error {
 func (c *Component) manage(ctx context.Context, opts []kgo.Opt, brokers []string, topic string, tc TopicConfiguration) error {
 	client, err := kgo.NewClient(opts...)
 	if err != nil {
-		c.r.Err(err).
+		c.r.Debug().
+			Err(err).
 			Str("brokers", strings.Join(brokers, ",")).
 			Msg("unable to create Kafka client for topic creation")
 		return fmt.Errorf("unable to create Kafka client for topic creation: %w", err)
@@ -130,7 +131,8 @@ func (c *Component) manage(ctx context.Context, opts []kgo.Opt, brokers []string
 	admin := kadm.NewClient(client)
 	topics, err := admin.ListTopics(ctx)
 	if err != nil {
-		c.r.Err(err).
+		c.r.Debug().
+			Err(err).
 			Str("brokers", strings.Join(brokers, ",")).
 			Msg("unable to get metadata for topics")
 		return fmt.Errorf("unable to get metadata for topics: %w", err)
@@ -148,7 +150,7 @@ func (c *Component) reconcileTopic(ctx context.Context, admin *kadm.Client, topi
 	td, ok := topics[topic]
 	if !ok {
 		if _, err := admin.CreateTopics(ctx, tc.NumPartitions, tc.ReplicationFactor, tc.ConfigEntries, topic); err != nil {
-			l.Err(err).Msg("unable to create topic")
+			l.Debug().Err(err).Msg("unable to create topic")
 			return fmt.Errorf("unable to create topic %q: %w", topic, err)
 		}
 		l.Info().Msg("topic created")
@@ -161,7 +163,7 @@ func (c *Component) reconcileTopic(ctx context.Context, admin *kadm.Client, topi
 	} else if nbPartitions < int(tc.NumPartitions) {
 		add := int(tc.NumPartitions) - nbPartitions
 		if _, err := admin.CreatePartitions(ctx, add, topic); err != nil {
-			l.Err(err).Msg("unable to add more partitions")
+			l.Debug().Err(err).Msg("unable to add more partitions")
 			return fmt.Errorf("unable to add more partitions to topic %q: %w", topic, err)
 		}
 		l.Info().Msg("number of partitions increased")
@@ -173,7 +175,7 @@ func (c *Component) reconcileTopic(ctx context.Context, admin *kadm.Client, topi
 	}
 	configs, err := admin.DescribeTopicConfigs(ctx, topic)
 	if err != nil || len(configs) != 1 {
-		l.Err(err).Msg("unable to get topic configuration")
+		l.Debug().Err(err).Msg("unable to get topic configuration")
 		return fmt.Errorf("unable to get topic %q configuration: %w", topic, err)
 	}
 	got := map[string]*string{}
@@ -201,7 +203,7 @@ func (c *Component) reconcileTopic(ctx context.Context, admin *kadm.Client, topi
 			}
 		}
 		if _, err := admin.AlterTopicConfigs(ctx, alterConfigs, topic); err != nil {
-			l.Err(err).Msg("unable to set topic configuration")
+			l.Debug().Err(err).Msg("unable to set topic configuration")
 			return fmt.Errorf("unable to set topic configuration for %q: %w", topic, err)
 		}
 		l.Info().Msg("topic updated")

@@ -102,6 +102,11 @@ type Entry struct {
 }
 
 // wireEntry is the JSON representation of an Entry in the Kafka topic.
+//
+// The payload embeds goflow2's template structs verbatim. It is versioned only
+// by pb.Version in the topic name: a goflow2 change that alters those structs
+// without a protobuf version bump would make a rolling upgrade mis-decode
+// records written by the other binary.
 type wireEntry struct {
 	Kind         string          `json:"kind,omitempty"`
 	Hash         string          `json:"hash,omitempty"`
@@ -146,8 +151,10 @@ func (e *Entry) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	if w.Template == nil {
-		e.Template = nil
-		return nil
+		// A non-sampler entry without a template cannot be decoded and would
+		// poison the state file (MarshalJSON would fail for the whole snapshot).
+		// Reject it so it is counted and skipped.
+		return fmt.Errorf("template entry %q has no template", w.Kind)
 	}
 	template, err := UnmarshalTemplate(w.Kind, w.Template)
 	if err != nil {

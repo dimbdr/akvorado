@@ -192,9 +192,9 @@ func TestManageTemplateTopic(t *testing.T) {
 	}
 }
 
-// TestTemplateTopicFailureIsWarning checks an unreachable template broker does
+// TestTemplateTopicFailureIsNonFatal checks an unreachable template broker does
 // not stop the orchestrator and is bounded by the 5s timeout.
-func TestTemplateTopicFailureIsWarning(t *testing.T) {
+func TestTemplateTopicFailureIsNonFatal(t *testing.T) {
 	config := DefaultTemplateConfiguration()
 	config.Enabled = true
 	config.ManageTopic = true

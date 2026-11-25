@@ -935,9 +935,12 @@ The shared template cache closes both gaps: the outlets publish the templates
 and sampling rates they receive to a compacted Kafka topic and preload that
 topic at startup, so any pod can decode any flow.
 
-It is **disabled by default**. The orchestrator manages the topic and injects
-this block into every outlet when `kafka-templates.enabled` is set; operators
-normally do not write it by hand. If written by hand, `topic` is required. Keys:
+It is **disabled by default**. When `kafka-templates.enabled` is set, the
+orchestrator injects this block into every outlet; when `manage-topic` is also
+set, it creates and maintains the topic. Operators normally do not write this
+block by hand. With `enabled` but not `manage-topic`, the topic must already
+exist: otherwise the cache stays local-only and `publish_errors_total` climbs
+until it does. If written by hand, `topic` is required. Keys:
 
 - `enabled` turns the cache on (default: `false`).
 - `topic` is the template topic base name; the protobuf version is appended
