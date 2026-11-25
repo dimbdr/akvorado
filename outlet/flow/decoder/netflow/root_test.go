@@ -20,6 +20,7 @@ import (
 	"akvorado/common/reporter"
 	"akvorado/common/schema"
 	"akvorado/outlet/flow/decoder"
+	"akvorado/outlet/flow/templatecache"
 
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/netsampler/goflow2/v3/decoders/netflow"
@@ -210,6 +211,13 @@ func TestTemplatesMixedWithData(t *testing.T) {
 	}
 	if diff := helpers.Diff(gotMetrics, expectedMetrics); diff != "" {
 		t.Fatalf("Metrics after data (-got, +want):\n%s", diff)
+	}
+
+	// The first data set arrived before its template: it is counted as a raw
+	// flow set (partial loss), not as a decode error.
+	rawMetrics := r.GetMetrics("akvorado_outlet_flow_decoder_netflow_", "sets_")
+	if got := rawMetrics[`sets_total{exporter="::ffff:127.0.0.1",type="RawFlowSet",version="9"}`]; got != "1" {
+		t.Fatalf("RawFlowSet counter = %q, want \"1\"", got)
 	}
 }
 
@@ -453,8 +461,9 @@ func TestDecodeWithoutTemplate(t *testing.T) {
 	_, err := nfdecoder.Decode(
 		decoder.RawFlow{Payload: packets[1], Source: netip.MustParseAddr("::ffff:127.0.0.1")},
 		options, bf, finalize)
-	if err != nil {
-		t.Fatalf("Decode() error:\n%+v", err)
+	var notFound *decoder.TemplateNotFoundError
+	if !errors.As(err, &notFound) {
+		t.Fatalf("Decode() error = %v, want *decoder.TemplateNotFoundError", err)
 	}
 
 	expectedFlows := []*schema.FlowMessage{}
@@ -497,22 +506,26 @@ func TestDecodeZeroSizeRecord(t *testing.T) {
 	cases := []struct {
 		description string
 		payload     []byte
+		templateErr bool
 	}{
 		{
 			description: "NetFlow v9 template without fields",
 			payload: nfv9(
 				set(0, u16(256), u16(0)),
 				set(256, []byte{0, 0, 0, 0})),
+			templateErr: true,
 		}, {
 			description: "NetFlow v9 options template without scope nor option",
 			payload: nfv9(
 				set(1, u16(257), u16(0), u16(0), []byte{0, 0}),
 				set(257, []byte{0, 0, 0, 0})),
+			templateErr: true,
 		}, {
 			description: "IPFIX template withdrawal followed by data",
 			payload: ipfix(
 				set(2, u16(256), u16(0)),
 				set(256, []byte{0, 0, 0, 0})),
+			templateErr: true,
 		}, {
 			description: "IPFIX template with a zero-length field",
 			payload: ipfix(
@@ -533,7 +546,12 @@ func TestDecodeZeroSizeRecord(t *testing.T) {
 			}()
 			select {
 			case err := <-done:
-				if !errors.Is(err, netflow.ErrorEmptyRecord) {
+				if tc.templateErr {
+					var notFound *decoder.TemplateNotFoundError
+					if !errors.As(err, &notFound) {
+						t.Errorf("Decode() error = %v, want *decoder.TemplateNotFoundError", err)
+					}
+				} else if !errors.Is(err, netflow.ErrorEmptyRecord) {
 					t.Errorf("Decode() error:\n%+v", err)
 				}
 			case <-time.After(time.Second):
@@ -1200,5 +1218,170 @@ func TestDecodeEVPN(t *testing.T) {
 
 	if diff := helpers.Diff(flow4, expectedFlow4); diff != "" {
 		t.Fatalf("Flow #4 diff (-got, +want):\n%s", diff)
+	}
+}
+
+func buildU16(value uint16) []byte {
+	return binary.BigEndian.AppendUint16(nil, value)
+}
+
+func buildSet(id uint16, content ...[]byte) []byte {
+	var body []byte
+	for _, c := range content {
+		body = append(body, c...)
+	}
+	b := buildU16(id)
+	b = binary.BigEndian.AppendUint16(b, uint16(4+len(body)))
+	return append(b, body...)
+}
+
+func buildNFv9(sets ...[]byte) []byte {
+	b := buildU16(9)
+	b = append(b, buildU16(uint16(len(sets)))...)
+	b = append(b, make([]byte, 16)...)
+	for _, s := range sets {
+		b = append(b, s...)
+	}
+	return b
+}
+
+func buildIPFIX(sets ...[]byte) []byte {
+	var body []byte
+	for _, s := range sets {
+		body = append(body, s...)
+	}
+	b := buildU16(10)
+	b = binary.BigEndian.AppendUint16(b, uint16(16+len(body)))
+	b = append(b, make([]byte, 12)...)
+	return append(b, body...)
+}
+
+func TestTemplateSharedAcrossDecoders(t *testing.T) {
+	r := reporter.NewMock(t)
+	sch := schema.NewMock(t).EnableAllColumns()
+	cache, err := templatecache.New(r, templatecache.DefaultConfiguration())
+	if err != nil {
+		t.Fatalf("templatecache.New() error: %v", err)
+	}
+	first := New(r, decoder.Dependencies{Schema: sch, TemplateCache: cache})
+	second := New(r, decoder.Dependencies{Schema: sch, TemplateCache: cache})
+	options := decoder.Options{TimestampSource: pb.RawFlow_TS_INPUT}
+	packets := slices.Collect(helpers.ReadManyPcapL4(t, filepath.Join("testdata", "datalink.pcap")))
+	source := netip.MustParseAddr("::ffff:127.0.0.1")
+
+	bf := sch.NewFlowMessage()
+	templateFlows := []*schema.FlowMessage{}
+	finalize := func() {
+		clone := *bf
+		templateFlows = append(templateFlows, &clone)
+		bf.Clear()
+	}
+	if _, err := first.Decode(
+		decoder.RawFlow{Payload: packets[0], Source: source},
+		options, bf, finalize); err != nil {
+		t.Fatalf("first Decode() error:\n%+v", err)
+	}
+	if len(templateFlows) != 0 {
+		t.Fatalf("first Decode() produced %d flows, want 0", len(templateFlows))
+	}
+
+	bf = sch.NewFlowMessage()
+	dataFlows := []*schema.FlowMessage{}
+	finalize = func() {
+		clone := *bf
+		dataFlows = append(dataFlows, &clone)
+		bf.Clear()
+	}
+	nb, err := second.Decode(
+		decoder.RawFlow{Payload: packets[1], Source: source},
+		options, bf, finalize)
+	if err != nil {
+		t.Fatalf("second Decode() error:\n%+v", err)
+	}
+	if nb != 1 || len(dataFlows) != 1 {
+		t.Fatalf("second Decode() returned %d flows, want 1", nb)
+	}
+}
+
+func TestTemplateWithdrawal(t *testing.T) {
+	r, nfdecoder, bf, _, finalize := setup(t, true)
+	options := decoder.Options{TimestampSource: pb.RawFlow_TS_INPUT}
+	source := netip.MustParseAddr("::ffff:127.0.0.1")
+
+	payload := buildNFv9(
+		buildSet(0, buildU16(256), buildU16(1), buildU16(8), buildU16(4)),
+		buildSet(256, []byte{0, 0, 0, 1}),
+	)
+	nb, err := nfdecoder.Decode(decoder.RawFlow{Payload: payload, Source: source}, options, bf, finalize)
+	if err != nil || nb != 1 {
+		t.Fatalf("Decode() = %d, %v; want 1, nil", nb, err)
+	}
+
+	payload = buildNFv9(
+		buildSet(0, buildU16(256), buildU16(0)),
+		buildSet(256, []byte{0, 0, 0, 2}),
+	)
+	nb, err = nfdecoder.Decode(decoder.RawFlow{Payload: payload, Source: source}, options, bf, finalize)
+	if nb != 0 {
+		t.Fatalf("Decode() returned %d flows after withdrawal, want 0", nb)
+	}
+	var notFound *decoder.TemplateNotFoundError
+	if !errors.As(err, &notFound) {
+		t.Fatalf("Decode() error = %v, want *decoder.TemplateNotFoundError", err)
+	}
+	metrics := r.GetMetrics("akvorado_outlet_flow_decoder_netflow_", "sets_")
+	if got := metrics[`sets_total{exporter="::ffff:127.0.0.1",type="RawFlowSet",version="9"}`]; got != "1" {
+		t.Fatalf("RawFlowSet counter = %q, want \"1\"", got)
+	}
+}
+
+func TestTemplateWithdrawAll(t *testing.T) {
+	_, nfdecoder, bf, _, finalize := setup(t, true)
+	options := decoder.Options{TimestampSource: pb.RawFlow_TS_INPUT}
+	source := netip.MustParseAddr("::ffff:127.0.0.1")
+
+	payload := buildIPFIX(
+		buildSet(2, buildU16(256), buildU16(1), buildU16(8), buildU16(4)),
+		buildSet(256, []byte{0, 0, 0, 1}),
+	)
+	nb, err := nfdecoder.Decode(decoder.RawFlow{Payload: payload, Source: source}, options, bf, finalize)
+	if err != nil || nb != 1 {
+		t.Fatalf("Decode() = %d, %v; want 1, nil", nb, err)
+	}
+
+	payload = buildIPFIX(
+		buildSet(2, buildU16(2), buildU16(0)),
+		buildSet(256, []byte{0, 0, 0, 2}),
+	)
+	nb, err = nfdecoder.Decode(decoder.RawFlow{Payload: payload, Source: source}, options, bf, finalize)
+	if nb != 0 {
+		t.Fatalf("Decode() returned %d flows after withdraw-all, want 0", nb)
+	}
+	var notFound *decoder.TemplateNotFoundError
+	if !errors.As(err, &notFound) {
+		t.Fatalf("Decode() error = %v, want *decoder.TemplateNotFoundError", err)
+	}
+}
+
+func TestPartialRawFlowSet(t *testing.T) {
+	r, nfdecoder, bf, _, finalize := setup(t, true)
+	options := decoder.Options{TimestampSource: pb.RawFlow_TS_INPUT}
+	source := netip.MustParseAddr("::ffff:127.0.0.1")
+
+	payload := buildIPFIX(
+		buildSet(256, []byte{0, 0, 0, 1}),
+		buildSet(2, buildU16(256), buildU16(1), buildU16(8), buildU16(4)),
+		buildSet(256, []byte{0, 0, 0, 2}),
+	)
+	nb, err := nfdecoder.Decode(decoder.RawFlow{Payload: payload, Source: source}, options, bf, finalize)
+	if err != nil {
+		t.Fatalf("Decode() error:\n%+v", err)
+	}
+	if nb != 1 {
+		t.Fatalf("Decode() returned %d flows, want 1", nb)
+	}
+	metrics := r.GetMetrics("akvorado_outlet_flow_decoder_netflow_", "sets_")
+	if got := metrics[`sets_total{exporter="::ffff:127.0.0.1",type="RawFlowSet",version="10"}`]; got != "1" {
+		t.Fatalf("RawFlowSet counter = %q, want \"1\"", got)
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"akvorado/common/reporter"
 	"akvorado/common/schema"
 	"akvorado/outlet/flow/decoder"
+	"akvorado/outlet/flow/templatecache"
 )
 
 // Decoder contains the state for the NetFlow v9 decoder.
@@ -45,8 +46,18 @@ func New(r *reporter.Reporter, dependencies decoder.Dependencies) decoder.Decode
 		d:         dependencies,
 		errLogger: r.Sample(reporter.BurstSampler(30*time.Second, 3)),
 	}
+	cache := dependencies.TemplateCache
+	if cache == nil {
+		var err error
+		cache, err = templatecache.New(r, templatecache.DefaultConfiguration())
+		if err != nil {
+			r.Err(err).Msg("cannot create local template cache, templates will not be stored")
+			cache = nil
+		}
+	}
 	nd.collection = templateAndOptionCollection{
 		nd:         nd,
+		cache:      cache,
 		Collection: make(map[string]*templatesAndOptions),
 	}
 
@@ -181,6 +192,7 @@ func (nd *Decoder) Decode(in decoder.RawFlow, options decoder.Options, bf *schem
 	nd.metrics.packets.WithLabelValues(key, versionStr).Inc()
 
 	nb := 0
+	missing := []templateKey{}
 	for _, fs := range flowSets {
 		switch fsConv := fs.(type) {
 		case netflow.TemplateFlowSet:
@@ -209,9 +221,25 @@ func (nd *Decoder) Decode(in decoder.RawFlow, options decoder.Options, bf *schem
 			nd.metrics.records.WithLabelValues(key, versionStr, "DataFlowSet").
 				Add(float64(len(fsConv.Records)))
 			nb += len(fsConv.Records)
+		case netflow.RawFlowSet:
+			nd.metrics.sets.WithLabelValues(key, versionStr, "RawFlowSet").
+				Inc()
+			missing = append(missing, templateKey{
+				version:     version,
+				obsDomainID: obsDomainID,
+				templateID:  fsConv.Id,
+			})
 		}
 	}
 
+	if nb == 0 && len(missing) > 0 {
+		return 0, &decoder.TemplateNotFoundError{
+			Exporter:    key,
+			Version:     version,
+			ObsDomainID: obsDomainID,
+			TemplateID:  missing[0].templateID,
+		}
+	}
 	return nb, nil
 }
 

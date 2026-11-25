@@ -6,12 +6,14 @@
 package decoder
 
 import (
+	"fmt"
 	"net/netip"
 	"time"
 
 	"akvorado/common/pb"
 	"akvorado/common/reporter"
 	"akvorado/common/schema"
+	"akvorado/outlet/flow/templatecache"
 )
 
 // Decoder is the interface each decoder should implement.
@@ -37,7 +39,23 @@ type Options struct {
 
 // Dependencies are the dependencies for the decoder
 type Dependencies struct {
-	Schema *schema.Component
+	Schema        *schema.Component
+	TemplateCache *templatecache.Cache
+}
+
+// TemplateNotFoundError is returned when a data set references a template that
+// the decoder does not have.
+type TemplateNotFoundError struct {
+	Exporter    string
+	Version     uint16
+	ObsDomainID uint32
+	TemplateID  uint16
+}
+
+// Error implements the error interface.
+func (e *TemplateNotFoundError) Error() string {
+	return fmt.Sprintf("template %d not found for exporter %s (version %d, observation domain %d)",
+		e.TemplateID, e.Exporter, e.Version, e.ObsDomainID)
 }
 
 // RawFlow is an undecoded flow.
