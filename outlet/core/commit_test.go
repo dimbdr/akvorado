@@ -8,6 +8,8 @@ import (
 	"context"
 	"encoding/gob"
 	"net/netip"
+	"path/filepath"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -365,5 +367,140 @@ func TestTrackAfterDecode(t *testing.T) {
 	expected := []kafkainput.Record{{Topic: "raw-flows", Partition: 3, Offset: 42}}
 	if diff := helpers.Diff(commits, expected); diff != "" {
 		t.Errorf("committed records (-got, +want):\n%s", diff)
+	}
+}
+
+// makeNetFlowRecordWithoutTemplate builds a raw-flow record carrying only a
+// NetFlow v9 data packet, without the template packet that precedes it.
+func makeNetFlowRecordWithoutTemplate(t *testing.T) kafkainput.Record {
+	t.Helper()
+	packets := slices.Collect(helpers.ReadManyPcapL4(
+		t, filepath.Join("..", "flow", "decoder", "netflow", "testdata", "datalink.pcap")))
+	rawFlow := &pb.RawFlow{
+		TimeReceived:     uint64(time.Now().Unix()),
+		Payload:          packets[1],
+		SourceAddress:    helpers.AddrTo6(netip.MustParseAddr("::ffff:127.0.0.1")).AsSlice(),
+		Decoder:          pb.RawFlow_DECODER_NETFLOW,
+		TimestampSource:  pb.RawFlow_TS_INPUT,
+		UseSourceAddress: true,
+	}
+	data, err := rawFlow.MarshalVT()
+	if err != nil {
+		t.Fatalf("MarshalVT() error: %v", err)
+	}
+	return kafkainput.Record{Topic: "raw-flows", Partition: 0, Offset: 7, Value: data}
+}
+
+func TestMissingTemplateIsTrackedAndCommittedAfterFlush(t *testing.T) {
+	clickhouseComponent := &flushableClickHouse{}
+	c := newCoreForCommitTest(t, clickhouseComponent)
+	var committed []kafkainput.Record
+	receive, _, _ := c.newWorker(0, make(chan kafkainput.ScaleRequest, 1), func(r kafkainput.Record) {
+		committed = append(committed, r)
+	})
+
+	record := makeNetFlowRecordWithoutTemplate(t)
+	if err := receive(context.Background(), record); err != nil {
+		t.Fatalf("processIncomingFlow() error: %v", err)
+	}
+	if len(committed) != 0 {
+		t.Fatalf("record committed before the ClickHouse flush: %v", committed)
+	}
+	clickhouseComponent.worker().Flush(context.Background())
+	// commitTracker keeps only the position: compare Topic/Partition/Offset.
+	got := make([]kafkainput.Record, len(committed))
+	for i, r := range committed {
+		got[i] = kafkainput.Record{Topic: r.Topic, Partition: r.Partition, Offset: r.Offset}
+	}
+	want := []kafkainput.Record{{Topic: record.Topic, Partition: record.Partition, Offset: record.Offset}}
+	if diff := helpers.Diff(got, want); diff != "" {
+		t.Fatalf("committed after flush (-got, +want):\n%s", diff)
+	}
+	metrics := c.r.GetMetrics("akvorado_outlet_core_", "raw_flows_errors_total")
+	if got := metrics[`raw_flows_errors_total{error="template not found"}`]; got != "1" {
+		t.Fatalf("template-not-found counter = %q, want \"1\"", got)
+	}
+}
+
+func TestDecodeErrorIsTrackedWithoutRetry(t *testing.T) {
+	clickhouseComponent := &flushableClickHouse{}
+	c := newCoreForCommitTest(t, clickhouseComponent)
+	var committed []kafkainput.Record
+	receive, _, _ := c.newWorker(0, make(chan kafkainput.ScaleRequest, 1), func(r kafkainput.Record) {
+		committed = append(committed, r)
+	})
+	rawFlow := &pb.RawFlow{
+		TimeReceived:    uint64(time.Now().Unix()),
+		Payload:         []byte{0x00, 0x2a, 0, 0},
+		SourceAddress:   make([]byte, 16),
+		Decoder:         pb.RawFlow_DECODER_NETFLOW,
+		TimestampSource: pb.RawFlow_TS_INPUT,
+	}
+	data, err := rawFlow.MarshalVT()
+	if err != nil {
+		t.Fatalf("MarshalVT() error: %v", err)
+	}
+	record := kafkainput.Record{Topic: "raw-flows", Partition: 0, Offset: 7, Value: data}
+	if err := receive(context.Background(), record); err != nil {
+		t.Fatalf("processIncomingFlow() error: %v", err)
+	}
+	clickhouseComponent.worker().Flush(context.Background())
+	if len(committed) != 1 {
+		t.Fatalf("record not committed after a decode error: %v", committed)
+	}
+	metrics := c.r.GetMetrics("akvorado_outlet_core_", "raw_flows_errors_total")
+	if got := metrics[`raw_flows_errors_total{error="cannot decode payload"}`]; got != "1" {
+		t.Fatalf("decode-error counter = %q, want \"1\"", got)
+	}
+}
+
+func TestPartialDecodeDoesNotLoseFlows(t *testing.T) {
+	clickhouseComponent := &flushableClickHouse{}
+	c := newCoreForCommitTest(t, clickhouseComponent)
+	c.config.DefaultSamplingRate = helpers.MustNewSubnetMap(map[string]uint{
+		"::ffff:127.0.0.1/128": 1000,
+	})
+	var committed []kafkainput.Record
+	receive, _, _ := c.newWorker(0, make(chan kafkainput.ScaleRequest, 1), func(r kafkainput.Record) {
+		committed = append(committed, r)
+	})
+
+	packets := slices.Collect(helpers.ReadManyPcapL4(
+		t, filepath.Join("..", "flow", "decoder", "netflow", "testdata", "data+templates.pcap")))
+	rawFlow := &pb.RawFlow{
+		TimeReceived:     uint64(time.Now().Unix()),
+		Payload:          packets[0],
+		SourceAddress:    helpers.AddrTo6(netip.MustParseAddr("::ffff:127.0.0.1")).AsSlice(),
+		Decoder:          pb.RawFlow_DECODER_NETFLOW,
+		TimestampSource:  pb.RawFlow_TS_INPUT,
+		UseSourceAddress: true,
+	}
+	data, err := rawFlow.MarshalVT()
+	if err != nil {
+		t.Fatalf("MarshalVT() error: %v", err)
+	}
+	record := kafkainput.Record{Topic: "raw-flows", Partition: 0, Offset: 11, Value: data}
+	if err := receive(context.Background(), record); err != nil {
+		t.Fatalf("processIncomingFlow() error: %v", err)
+	}
+
+	if len(committed) != 0 {
+		t.Fatalf("record committed before the ClickHouse flush: %v", committed)
+	}
+	metrics := c.r.GetMetrics("akvorado_outlet_core_", "received_flows_total")
+	if got := metrics[`received_flows_total{exporter="127.0.0.1"}`]; got != "10" {
+		t.Fatalf("received flows = %q, want \"10\"", got)
+	}
+	errorsMetrics := c.r.GetMetrics("akvorado_outlet_core_", "raw_flows_errors_total")
+	if got := errorsMetrics[`raw_flows_errors_total{error="template not found"}`]; got != "" {
+		t.Fatalf("template-not-found counter = %q, want none", got)
+	}
+
+	clickhouseComponent.worker().Flush(context.Background())
+	if len(committed) != 1 {
+		t.Fatalf("committed after flush = %d records, want 1", len(committed))
+	}
+	if got := c.r.GetMetrics("akvorado_outlet_core_", "flows_errors_total")[`flows_errors_total{error="sampling rate missing",exporter="127.0.0.1"}`]; got != "" {
+		t.Fatalf("sampling-rate-missing counter = %q, want none", got)
 	}
 }

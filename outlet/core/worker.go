@@ -6,12 +6,14 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync/atomic"
 
 	"akvorado/common/pb"
 	"akvorado/common/reporter"
 	"akvorado/common/schema"
 	"akvorado/outlet/clickhouse"
+	"akvorado/outlet/flow/decoder"
 	"akvorado/outlet/kafkainput"
 )
 
@@ -157,7 +159,12 @@ func (w *worker) processIncomingFlow(ctx context.Context, record kafkainput.Reco
 
 	if err != nil {
 		// w.bf.ExporterAddress may not be known yet, so increase raw_flows_errors_total.
-		w.c.metrics.rawFlowsErrors.WithLabelValues("cannot decode payload").Inc()
+		var notFound *decoder.TemplateNotFoundError
+		if errors.As(err, &notFound) {
+			w.c.metrics.rawFlowsErrors.WithLabelValues("template not found").Inc()
+		} else {
+			w.c.metrics.rawFlowsErrors.WithLabelValues("cannot decode payload").Inc()
+		}
 		return nil
 	}
 
