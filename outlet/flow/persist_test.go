@@ -116,8 +116,8 @@ func TestRestoreVersionMismatch(t *testing.T) {
 	tmpDir := t.TempDir()
 	versionMismatchFile := filepath.Join(tmpDir, "version_mismatch.json")
 
-	// Write a JSON file with version 999 (incompatible version)
-	incompatibleData := `{"version":999,"collection":{}}`
+	// Write a JSON file with version 1 (the previous, incompatible version)
+	incompatibleData := `{"Version": 1, "Decoders": {}}`
 	err := os.WriteFile(versionMismatchFile, []byte(incompatibleData), 0644)
 	if err != nil {
 		t.Fatalf("WriteFile() error:\n%+v", err)
