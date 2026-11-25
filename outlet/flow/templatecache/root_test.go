@@ -283,3 +283,35 @@ func (p *fakeProducer) TryProduce(_ context.Context, r *kgo.Record, promise func
 }
 
 func (p *fakeProducer) Close() {}
+
+func TestSeveralObservationDomains(t *testing.T) {
+	c := newCache(t, DefaultConfiguration())
+	exporter := "192.0.2.10"
+	first := Key{Version: 10, Exporter: exporter, ObsDomainID: 300, TemplateID: 256}
+	second := Key{Version: 10, Exporter: exporter, ObsDomainID: 301, TemplateID: 256}
+	if _, err := c.SetTemplate(first, testTemplate()); err != nil {
+		t.Fatalf("SetTemplate(first) error: %v", err)
+	}
+	if _, err := c.SetTemplate(second, netflow.TemplateRecord{TemplateId: 256, FieldCount: 2}); err != nil {
+		t.Fatalf("SetTemplate(second) error: %v", err)
+	}
+	if _, ok := c.GetTemplate(first); !ok {
+		t.Fatal("first observation domain template is missing")
+	}
+	if got, ok := c.GetTemplate(second); !ok {
+		t.Fatal("second observation domain template is missing")
+	} else if diff := helpers.Diff(got, netflow.TemplateRecord{TemplateId: 256, FieldCount: 2}); diff != "" {
+		t.Fatalf("second observation domain template (-got, +want):\n%s", diff)
+	}
+
+	// A withdraw-all on one observation domain leaves the other untouched.
+	if err := c.DeleteTemplates(exporter, 10, 300, false); err != nil {
+		t.Fatalf("DeleteTemplates() error: %v", err)
+	}
+	if _, ok := c.GetTemplate(first); ok {
+		t.Fatal("first observation domain template was not withdrawn")
+	}
+	if _, ok := c.GetTemplate(second); !ok {
+		t.Fatal("second observation domain template was withdrawn too")
+	}
+}
