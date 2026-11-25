@@ -10,6 +10,12 @@ identified with a specific icon:
 - 🩹: bug fix
 - 🌱: miscellaneous change
 
+## Unreleased
+
+- 🩹 *outlet*: share NetFlow/IPFIX templates and sampling rates across outlet
+  pods through a compacted Kafka topic, so flows are no longer dropped when
+  their template was received by another pod or before a restart (NAO-6070)
+
 ## 2026.10.1 - 2026-10-25
 
 - ✨ *inlet*: add support for IPFIX over TCP and SCTP

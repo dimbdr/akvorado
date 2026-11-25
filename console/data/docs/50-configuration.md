@@ -917,11 +917,69 @@ each worker spreads its batches across them:
 
 ### Flow
 
-The flow component decodes flows received from Kafka. There is only one setting:
+The flow component decodes flows received from Kafka. It accepts the following
+settings:
 
 - `state-persist-file` defines the location of the file to save the state of the
-  flow decoders and read it back on startup. It is used to store IPFIX/NetFlow
-  templates and options.
+  flow decoders and read it back on startup. It stores the IPFIX/NetFlow
+  templates, options templates and sampling rates seen by this pod.
+- `template-cache` configures the shared template cache (see below).
+
+#### Shared template cache
+
+NetFlow/IPFIX flows reference their template (and often a sampling rate) by ID;
+a data packet that arrives before its template cannot be decoded. Because the
+inlet load-balances flows across outlet pods, a pod can receive data whose
+template was seen by another pod — and every pod starts with an empty cache.
+The shared template cache closes both gaps: the outlets publish the templates
+and sampling rates they receive to a compacted Kafka topic and preload that
+topic at startup, so any pod can decode any flow.
+
+It is **disabled by default**. The orchestrator manages the topic and injects
+this block into every outlet when `kafka-templates.enabled` is set; operators
+normally do not write it by hand. If written by hand, `topic` is required. Keys:
+
+- `enabled` turns the cache on (default: `false`).
+- `topic` is the template topic base name; the protobuf version is appended
+  (`topic-v<version>`), matching what the orchestrator manages.
+- `brokers`, `tls`, `sasl` are as in the [orchestrator Kafka config](#kafka-1).
+- `ttl` is the maximum age of an entry before it is ignored (default: `0`,
+  which disables expiry; compaction deduplicates the topic).
+- `refresh-interval` is how often an unchanged template is republished to keep
+  it in the compacted topic (default: `15m`).
+- `preload-timeout` bounds how long a starting outlet waits for the topic
+  preload before it starts consuming flows (default: `30s`).
+- `queue-size` is the maximum number of records buffered before dropping
+  (default: `4096`).
+
+The cache is a best-effort warm-up: a template missing from both the local state
+file and the topic is still dropped, and **v1 has no per-packet retry**. Loss is
+exposed by three metrics:
+
+- `akvorado_outlet_flow_decoder_netflow_sets_total{type="RawFlowSet"}` counts
+  data sets that arrived without their template.
+- `akvorado_outlet_core_raw_flows_errors_total{error="template not found"}`
+  counts the corresponding records. They are still committed to Kafka after the
+  next ClickHouse flush, so they are not re-read.
+- `akvorado_outlet_core_flows_errors_total{error="sampling rate missing"}`
+  counts flows skipped because no sampling rate was known. This was the dominant
+  startup loss: a sampling rate received by one pod was invisible to the others,
+  so their flows were dropped before enrichment.
+
+After enabling the cache, `sampling rate missing` must stay flat across an
+outlet restart once the topic holds the sampler and template keys for the
+affected exporters. A jump means the topic did not have the entry yet, and the
+cache could not help.
+
+```yaml
+flow:
+  state-persist-file: /run/akvorado/flow.state
+  template-cache:
+    enabled: true
+    topic: akvorado.templates
+    brokers:
+      - kafka:9092
+```
 
 ## Orchestrator service
 
@@ -1139,6 +1197,48 @@ not, e.g. the input lives on a shared cluster). It takes a `topic` base name (th
 schema hash is appended, matching `kafka-output`) plus the connection and
 topic-configuration keys (`num-partitions`, `replication-factor`,
 `config-entries`, `config-entries-strict-sync`).
+
+A top-level **`kafka-templates`** block configures the compacted topic shared by
+the outlets for NetFlow/IPFIX templates and sampling rates (see the [outlet
+shared template cache](#shared-template-cache)). It takes:
+
+- `enabled` turns the shared cache on for every outlet. When false (the
+  default), the orchestrator omits `flow.template-cache` from the outlet
+  configuration entirely, so an older outlet never sees the unknown key.
+- `manage-topic` controls whether the orchestrator creates or updates the
+  template topic (default: `false`).
+- `topic` is the base name; the protobuf version is appended
+  (`topic-v<version>`). Default: `templates`.
+- `brokers`, `tls`, `sasl` are optional: when `brokers` is not set, the
+  orchestrator inherits the `kafka` cluster settings (keeping the template
+  `topic`).
+- `topic-configuration` describes the topic. The default is a single partition,
+  `cleanup.policy=compact,delete`, `retention.ms=-1`, and
+  `message.timestamp.type=CreateTime`. Compaction deduplicates entries;
+  `retention.ms=-1` disables time-based deletion, so only tombstones expire and
+  a rarely re-sent options template is never deleted. A deleted template costs a
+  startup burst of undecodable flows.
+
+A template-topic failure is **not fatal**: the orchestrator logs a warning and
+starts, and the outlets keep decoding with an empty shared cache until the topic
+exists. The orchestrator injects `flow.template-cache` (including its `topic`)
+into every outlet; an operator-written outlet block is cleared when the cache is
+disabled.
+
+```yaml
+kafka-templates:
+  enabled: true
+  manage-topic: true
+  topic: akvorado.templates
+  topic-configuration:
+    num-partitions: 1
+    replication-factor: 2
+    config-entries-strict-sync: true
+    config-entries:
+      cleanup.policy: compact,delete
+      message.timestamp.type: CreateTime
+      retention.ms: "-1"
+```
 
 The following keys are accepted for the TLS configuration:
 
