@@ -1,0 +1,10 @@
+---
+paths:
+  kafkatemplates.brokers:
+    - kafka1:9092
+  kafkatemplates.tls.enable: true
+  kafkatemplates.sasl.username: template-user
+  outlet.0.flow.templatecache.brokers:
+    - kafka1:9092
+  outlet.0.flow.templatecache.tls.enable: true
+  outlet.0.flow.templatecache.sasl.username: template-user

@@ -96,11 +96,19 @@ func (c *Component) Start() error {
 
 	if c.inputConfig.ManageTopic {
 		if err := c.manage(context.Background(), c.inputOpts, c.inputConfig.Brokers, c.inputTopic, c.inputConfig.TopicConfiguration); err != nil {
+			c.r.Err(err).
+				Str("brokers", strings.Join(c.inputConfig.Brokers, ",")).
+				Str("topic", c.inputTopic).
+				Msg("unable to manage input topic")
 			return err
 		}
 	}
 	if c.outputConfig != nil {
 		if err := c.manage(context.Background(), c.outputOpts, c.outputConfig.Brokers, c.outputTopic, c.outputConfig.TopicConfiguration); err != nil {
+			c.r.Err(err).
+				Str("brokers", strings.Join(c.outputConfig.Brokers, ",")).
+				Str("topic", c.outputTopic).
+				Msg("unable to manage output topic")
 			return err
 		}
 	}

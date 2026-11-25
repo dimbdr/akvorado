@@ -266,6 +266,7 @@ type fakeProducer struct {
 	mu      sync.Mutex
 	records []*kgo.Record
 	accept  bool
+	flushes int
 }
 
 func (p *fakeProducer) TryProduce(_ context.Context, r *kgo.Record, promise func(*kgo.Record, error)) {
@@ -284,7 +285,12 @@ func (p *fakeProducer) TryProduce(_ context.Context, r *kgo.Record, promise func
 	}
 }
 
-func (p *fakeProducer) Flush(context.Context) error { return nil }
+func (p *fakeProducer) Flush(context.Context) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.flushes++
+	return nil
+}
 
 func (p *fakeProducer) Close() {}
 
@@ -335,7 +341,7 @@ func TestPeerTombstoneOlderThanLocalWriteIgnored(t *testing.T) {
 	// A peer tombstone produced before our write can be ordered after it. It
 	// must not delete the newer local entry, or the pod stops decoding that
 	// exporter until the device re-sends the template.
-	c.deleteFromKafka(key, time.Now().Add(time.Hour), c.publishedOffset[key])
+	c.deleteFromKafka(key, time.Now().Add(time.Hour), c.publishedOffset[key]-1)
 	if _, ok := c.GetTemplate(key); !ok {
 		t.Fatal("an older peer tombstone deleted a newer local entry")
 	}
@@ -372,5 +378,23 @@ func TestMalformedTemplateRecordRejected(t *testing.T) {
 	}
 	if entry.Template != nil || entry.SamplingRate != 100 {
 		t.Fatalf("sampler entry = %+v, want no template and rate 100", entry)
+	}
+}
+
+func TestStopFlushesProducer(t *testing.T) {
+	c := newCache(t, DefaultConfiguration())
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	p := &fakeProducer{accept: true}
+	c.producer = p
+	if err := c.Stop(); err != nil {
+		t.Fatalf("Stop() error: %v", err)
+	}
+	if p.flushes != 1 {
+		t.Fatalf("Flush called %d times, want 1", p.flushes)
+	}
+	if c.producer != nil {
+		t.Fatal("producer was not released")
 	}
 }

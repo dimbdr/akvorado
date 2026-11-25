@@ -94,7 +94,7 @@ func (c *Cache) Stop() error {
 	if c.producer != nil {
 		// kgo.Close does not flush buffered records: send what we have before
 		// closing, so a template received just before shutdown is not lost.
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		if err := c.producer.Flush(ctx); err != nil {
 			c.r.Warn().Err(err).Msg("cannot flush template cache producer")
 		}
@@ -270,7 +270,9 @@ func (c *Cache) deleteFromKafka(key Key, timestamp time.Time, offset int64) {
 		c.mu.Unlock()
 		return
 	}
-	if published, ok := c.publishedOffset[key]; ok && offset <= published {
+	// Strictly below our last publish: our own tombstone echo is at exactly
+	// that offset and must be applied to converge with the topic.
+	if published, ok := c.publishedOffset[key]; ok && offset < published {
 		c.mu.Unlock()
 		return
 	}

@@ -328,6 +328,7 @@ func (c *Cache) purge() {
 		if now.Sub(entry.UpdatedAt) > c.config.TTL {
 			delete(c.entries, key)
 			delete(c.lastWrite, key)
+			delete(c.publishedOffset, key)
 			c.metrics.expired.Inc()
 		}
 	}
@@ -381,7 +382,7 @@ func (c *Cache) produce(key Key, record *kgo.Record) {
 		switch {
 		case err == nil:
 			c.mu.Lock()
-			if produced.Offset > c.publishedOffset[key] {
+			if current, ok := c.publishedOffset[key]; !ok || produced.Offset > current {
 				c.publishedOffset[key] = produced.Offset
 			}
 			c.mu.Unlock()

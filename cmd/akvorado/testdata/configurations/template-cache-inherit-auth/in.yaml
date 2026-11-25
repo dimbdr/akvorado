@@ -1,0 +1,18 @@
+---
+# The template topic inherits the main cluster brokers and TLS, but keeps the
+# SASL credentials the operator set on it.
+
+kafka:
+  topic: flows
+  brokers:
+    - kafka1:9092
+  tls:
+    enable: true
+
+kafka-templates:
+  enabled: true
+  topic: akvorado.templates
+  sasl:
+    username: template-user
+    password: template-pass
+    mechanism: plain
